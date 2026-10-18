@@ -7,12 +7,25 @@
  *
  * Each execution runs inside an AsyncLocalStorage scope tagged with the
  * active instance id, so concurrent instances write to the correct log.
+ *
+ * Ticket 07 additions:
+ * - Timeout enforcement: if the task doesn't complete within timeoutMs,
+ *   the instance is marked FAILED with reason 'timeout' and does NOT
+ *   return to PENDING.
+ * - Abort handling: when the abort signal fires, the instance is returned
+ *   to PENDING with its attempt number incremented (partial log preserved).
+ * - Completion callback: done(exitCode) marks SUCCESS (0) or FAILED (non-zero).
+ *   A task that returns without calling done is treated as exit code 0.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DB } from "../db/database.ts";
 import { appendLog, createLogFile } from "../db/logs.ts";
-import { updateInstanceState, getInstance } from "../db/queries.ts";
+import {
+  updateInstanceState,
+  getInstance,
+  incrementAttempt,
+} from "../db/queries.ts";
 import type { InstanceState } from "../db/schema.ts";
 
 // ─── Execution Context ─────────────────────────────────────────────────────────
@@ -40,7 +53,7 @@ export function runInInstanceContext<T>(
 }
 
 export function getCurrentInstance(): InstanceContext | null {
-  return instanceStore.getStore();
+  return instanceStore.getStore() ?? null;
 }
 
 // ─── Console Interception ──────────────────────────────────────────────────────
@@ -57,21 +70,23 @@ export function installConsoleInterception(): void {
 
   console.log = function (...args: unknown[]) {
     const ctx = getCurrentInstance();
-    const text = args.map(a => String(a)).join(" ");
-
-    if (ctx) {
-      appendLog(ctx.db, ctx.instanceId, "stdout", text);
+    if (!ctx) {
+      originalLog.call(console, ...args);
+      return;
     }
+    const text = args.map(a => String(a)).join(" ");
+    appendLog(ctx.db, ctx.instanceId, "stdout", text);
     originalLog.call(console, ...args);
   };
 
   console.error = function (...args: unknown[]) {
     const ctx = getCurrentInstance();
-    const text = args.map(a => String(a)).join(" ");
-
-    if (ctx) {
-      appendLog(ctx.db, ctx.instanceId, "stderr", text);
+    if (!ctx) {
+      originalError.call(console, ...args);
+      return;
     }
+    const text = args.map(a => String(a)).join(" ");
+    appendLog(ctx.db, ctx.instanceId, "stderr", text);
     originalError.call(console, ...args);
   };
 
@@ -87,7 +102,6 @@ export function uninstallConsoleInterception(): void {
 }
 
 // ─── Task Execution ────────────────────────────────────────────────────────────
-
 export interface TaskDefinition {
   id: string;
   entryPoint: string;  // Resolved path to index.ts
@@ -101,6 +115,7 @@ export async function executeTask(
   input: unknown,
   signal: AbortSignal,
   logDir: string,
+  abort: () => void,
 ): Promise<void> {
   // Create log file
   const logPath = createLogFile(logDir, instanceId);
@@ -108,11 +123,9 @@ export async function executeTask(
   // Update instance with log path
   db.run("UPDATE instances SET log_path = ? WHERE id = ?", [logPath, instanceId]);
 
-  // Mark as RUNNING
-  updateInstanceState(db, instanceId, "RUNNING");
-
   // Flag to track if done was called
   let completed = false;
+  let timedOut = false;
 
   const ctx: ExecutionContext<typeof input> = {
     input,
@@ -132,6 +145,25 @@ export async function executeTask(
       }
     },
   };
+
+  // Set up timeout
+  if (task.timeoutMs > 0) {
+    const timeoutHandle = setTimeout(() => {
+      if (completed) return;
+      timedOut = true;
+      completed = true;
+      // Timeout: mark FAILED with reason 'timeout', do NOT return to PENDING
+      updateInstanceState(db, instanceId, "FAILED", undefined, "timeout");
+      abort();
+    }, task.timeoutMs);
+
+    // Clear timeout on completion
+    const originalDone = ctx.done;
+    ctx.done = (exitCode: number) => {
+      clearTimeout(timeoutHandle);
+      originalDone(exitCode);
+    };
+  }
 
   // Run the task inside the AsyncLocalStorage context
   const result = await runInInstanceContext(
@@ -182,11 +214,8 @@ export async function abortInstance(
   const instance = getInstance(db, instanceId);
   if (!instance || instance.state !== "RUNNING") return;
 
-  // The runner sets the abort signal on the instance's context.
-  // The task is expected to honor it cooperatively.
-  // We just mark it as PENDING after the grace period.
-
-  // For now, immediately return to PENDING.
-  // The grace period is handled by the runner loop in ticket 06/07.
+  // Return to PENDING with incremented attempt number.
+  // Partial log is preserved (log file is not deleted).
+  incrementAttempt(db, instanceId);
   updateInstanceState(db, instanceId, "PENDING");
 }

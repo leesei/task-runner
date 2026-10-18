@@ -28,14 +28,14 @@ export function insertTask(db: DB, task: Omit<TaskRow, "created_at" | "updated_a
 }
 
 export function getTask(db: DB, id: string): TaskRow | null {
-  const row = db.query<TaskRow>(
+  const row = db.query<TaskRow, [string]>(
     "SELECT * FROM tasks WHERE id = ?",
   ).get(id);
   return row ?? null;
 }
 
 export function getAllTasks(db: DB): TaskRow[] {
-  return db.query<TaskRow>("SELECT * FROM tasks ORDER BY namespace, id").all();
+  return db.query<TaskRow, []>("SELECT * FROM tasks ORDER BY namespace, id").all();
 }
 
 export function deleteTask(db: DB, id: string): void {
@@ -43,7 +43,7 @@ export function deleteTask(db: DB, id: string): void {
 }
 
 export function getTasksWithWarnings(db: DB): TaskRow[] {
-  return db.query<TaskRow>(
+  return db.query<TaskRow, []>(
     "SELECT * FROM tasks WHERE manifest_warnings IS NOT NULL AND manifest_warnings != '' ORDER BY namespace, id",
   ).all();
 }
@@ -58,12 +58,12 @@ export function ensureQueue(db: DB, queueId: string, concurrency: number): void 
 }
 
 export function getQueue(db: DB, id: string): QueueRow | null {
-  const row = db.query<QueueRow>("SELECT * FROM queues WHERE id = ?").get(id);
+  const row = db.query<QueueRow, [string]>("SELECT * FROM queues WHERE id = ?").get(id);
   return row ?? null;
 }
 
 export function getAllQueues(db: DB): QueueRow[] {
-  return db.query<QueueRow>("SELECT * FROM queues ORDER BY id").all();
+  return db.query<QueueRow, []>("SELECT * FROM queues ORDER BY id").all();
 }
 
 export function updateQueueState(db: DB, id: string, state: QueueState): void {
@@ -81,7 +81,7 @@ export function updateQueueConcurrency(db: DB, id: string, concurrency: number):
 }
 
 export function getQueuesByState(db: DB, state: QueueState): QueueRow[] {
-  return db.query<QueueRow>(
+  return db.query<QueueRow, [QueueState]>(
     "SELECT * FROM queues WHERE state = ? ORDER BY id",
   ).all(state);
 }
@@ -97,31 +97,31 @@ export function insertInstance(
   const stmt = db.prepare(
     `INSERT INTO instances (task_id, input, log_path) VALUES (?, ?, ?)`,
   );
-  stmt.run(taskId, input, logPath);
-  return db.lastInsertRowId;
+  const result = stmt.run(taskId, input, logPath);
+  return Number((result as { lastInsertRowid?: number | bigint }).lastInsertRowid ?? 0);
 }
 
 export function getInstance(db: DB, id: number): InstanceRow | null {
-  const row = db.query<InstanceRow>(
+  const row = db.query<InstanceRow, [number]>(
     "SELECT * FROM instances WHERE id = ?",
   ).get(id);
   return row ?? null;
 }
 
 export function getAllInstances(db: DB): InstanceRow[] {
-  return db.query<InstanceRow>(
+  return db.query<InstanceRow, []>(
     "SELECT * FROM instances ORDER BY id DESC",
   ).all();
 }
 
 export function getInstancesByQueue(db: DB, queueId: string): InstanceRow[] {
-  return db.query<InstanceRow>(
+  return db.query<InstanceRow, [string]>(
     "SELECT * FROM instances WHERE task_id = ? ORDER BY id DESC",
   ).all(queueId);
 }
 
 export function getPendingInstances(db: DB, queueId: string): InstanceRow[] {
-  return db.query<InstanceRow>(
+  return db.query<InstanceRow, [string]>(
     "SELECT * FROM instances WHERE task_id = ? AND state = 'PENDING' ORDER BY id ASC",
   ).all(queueId);
 }
@@ -131,8 +131,8 @@ export function getRunningInstances(db: DB, queueId?: string): InstanceRow[] {
     ? "SELECT * FROM instances WHERE state = 'RUNNING' AND task_id = ? ORDER BY id"
     : "SELECT * FROM instances WHERE state = 'RUNNING' ORDER BY id";
   return queueId
-    ? db.query<InstanceRow>(sql).all(queueId)
-    : db.query<InstanceRow>(sql).all();
+    ? db.query<InstanceRow, [string]>(sql).all(queueId)
+    : db.query<InstanceRow, []>(sql).all();
 }
 
 export function updateInstanceState(
@@ -157,16 +157,22 @@ export function updateInstanceState(
 }
 
 export function resetRunningInstancesToPending(db: DB): number {
-  const now = new Date().toISOString();
   const result = db.run(
     "UPDATE instances SET state = 'PENDING', started_at = NULL, exit_code = NULL, failure_reason = NULL WHERE state = 'RUNNING'",
   );
   return result.changes;
 }
 
+export function incrementAttempt(db: DB, instanceId: number): void {
+  db.run(
+    "UPDATE instances SET attempt = attempt + 1 WHERE id = ?",
+    [instanceId],
+  );
+}
+
 export function deleteSuccessInstances(db: DB, queueId: string): number {
   // Get log paths before deleting
-  const rows = db.query<{ log_path: string | null }>(
+  const rows = db.query<{ log_path: string | null }, [string]>(
     "SELECT log_path FROM instances WHERE task_id = ? AND state = 'SUCCESS'",
   ).all(queueId);
 
@@ -188,7 +194,7 @@ export function deleteSuccessInstances(db: DB, queueId: string): number {
 
 export function deleteFinishedInstances(db: DB, queueId: string): { deleted: number; running_ids: number[] } {
   // Check for running instances first
-  const running = db.query<{ id: number }>(
+  const running = db.query<{ id: number }, [string]>(
     "SELECT id FROM instances WHERE task_id = ? AND state = 'RUNNING'",
   ).all(queueId);
 
@@ -197,7 +203,7 @@ export function deleteFinishedInstances(db: DB, queueId: string): { deleted: num
   }
 
   // Get log paths for all finished instances
-  const rows = db.query<{ log_path: string | null }>(
+  const rows = db.query<{ log_path: string | null }, [string]>(
     "SELECT log_path FROM instances WHERE task_id = ? AND state IN ('SUCCESS', 'FAILED')",
   ).all(queueId);
 
@@ -223,16 +229,16 @@ export function getQueueCounts(db: DB, queueId: string): {
   succeeded: number;
   failed: number;
 } {
-  const running = db.query<{ count: number }>(
+  const running = db.query<{ count: number }, [string]>(
     "SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'RUNNING'",
   ).get(queueId)!.count;
-  const pending = db.query<{ count: number }>(
+  const pending = db.query<{ count: number }, [string]>(
     "SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'PENDING'",
   ).get(queueId)!.count;
-  const succeeded = db.query<{ count: number }>(
+  const succeeded = db.query<{ count: number }, [string]>(
     "SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'SUCCESS'",
   ).get(queueId)!.count;
-  const failed = db.query<{ count: number }>(
+  const failed = db.query<{ count: number }, [string]>(
     "SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'FAILED'",
   ).get(queueId)!.count;
 
@@ -246,16 +252,16 @@ export function getTotalCounts(db: DB): {
   succeeded: number;
   failed: number;
 } {
-  const running = db.query<{ count: number }>(
+  const running = db.query<{ count: number }, []>(
     "SELECT COUNT(*) as count FROM instances WHERE state = 'RUNNING'",
   ).get()!.count;
-  const pending = db.query<{ count: number }>(
+  const pending = db.query<{ count: number }, []>(
     "SELECT COUNT(*) as count FROM instances WHERE state = 'PENDING'",
   ).get()!.count;
-  const succeeded = db.query<{ count: number }>(
+  const succeeded = db.query<{ count: number }, []>(
     "SELECT COUNT(*) as count FROM instances WHERE state = 'SUCCESS'",
   ).get()!.count;
-  const failed = db.query<{ count: number }>(
+  const failed = db.query<{ count: number }, []>(
     "SELECT COUNT(*) as count FROM instances WHERE state = 'FAILED'",
   ).get()!.count;
   const total = running + pending + succeeded + failed;

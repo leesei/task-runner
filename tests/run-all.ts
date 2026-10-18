@@ -1,8 +1,8 @@
-import { runWith as lsRunWith } from "../ls/index.ts";
-import { runWith as minfoRunWith } from "../minfo/index.ts";
-import { runWith as catRunWith } from "../cat/index.ts";
-import { runWith as envRunWith } from "../env/index.ts";
-import { runWith as shaRunWith } from "../sha256/index.ts";
+import { runWith as lsRunWith } from "../tasks/ls/index.ts";
+import { runWith as minfoRunWith } from "../tasks/minfo/index.ts";
+import { runWith as catRunWith } from "../tasks/cat/index.ts";
+import { runWith as envRunWith } from "../tasks/env/index.ts";
+import { runWith as shaRunWith } from "../tasks/sha256/index.ts";
 
 interface RunOpts {
   input: Record<string, unknown>;

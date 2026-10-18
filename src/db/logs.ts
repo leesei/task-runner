@@ -46,8 +46,8 @@ export function readLogFile(logPath: string): LogRecord[] {
 
   return content
     .split("\n")
-    .filter(line => line.trim())
-    .map(line => JSON.parse(line) as LogRecord);
+    .filter((line: string) => line.trim())
+    .map((line: string) => JSON.parse(line) as LogRecord);
 }
 
 export function mergeLogRecords(records: LogRecord[]): string {

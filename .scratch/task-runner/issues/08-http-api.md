@@ -4,7 +4,7 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] `GET /api/health` returns liveness + pid, port, dataDir, startedAt
 - [ ] `GET /api/queues` returns list with state, concurrency, running, pending, succeeded, failed counts

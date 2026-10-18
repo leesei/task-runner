@@ -2,10 +2,18 @@
  * Task runner loop.
  *
  * Picks PENDING instances from PROCESSING queues in FIFO order,
- * respecting per-queue concurrency, and marks them as RUNNING.
+ * respecting per-queue concurrency.
+ *
+ * For each launched instance:
+ *   1. Mark as RUNNING with started_at
+ *   2. Create an AbortController and pass its signal to the task
+ *   3. Execute with timeout enforcement
+ *   4. On completion: mark SUCCESS/FAILED, set ended_at/duration
+ *   5. On timeout: mark FAILED with reason 'timeout', do NOT return to PENDING
+ *   6. On abort: return to PENDING with incremented attempt, preserve partial log
  *
  * Actual task execution (loading entrypoint, running function,
- * console interception, log capture) is in ticket 05.
+ * console interception, log capture) is in execution.ts.
  */
 
 import type { DB } from "../db/database.ts";
@@ -16,6 +24,7 @@ import {
   getPendingInstances,
   getRunningInstances,
   getTask,
+  updateInstanceState,
 } from "../db/queries.ts";
 import { executeTask } from "./execution.ts";
 import { resolveDataDir } from "../db/database.ts";
@@ -43,7 +52,7 @@ export function createRunner(config: Partial<RunnerConfig> = {}) {
       let launched = 0;
 
       // Get all PROCESSING queues
-      const queues = db.query<{ id: string; concurrency: number }>(
+      const queues = db.query<{ id: string; concurrency: number }, []>(
         "SELECT id, concurrency FROM queues WHERE state = 'PROCESSING' ORDER BY id",
       ).all();
 
@@ -62,6 +71,7 @@ export function createRunner(config: Partial<RunnerConfig> = {}) {
 
         for (let i = 0; i < toLaunch; i++) {
           const instance = pending[i];
+          if (!instance) continue;
           const task = getTask(db, queue.id);
           if (!task) continue;
 
@@ -73,18 +83,26 @@ export function createRunner(config: Partial<RunnerConfig> = {}) {
             input = instance.input;
           }
 
-          // Execute the task
+          // Mark instance as RUNNING before executing
+          updateInstanceState(db, instance.id, "RUNNING");
+
+          // Create an AbortController for this instance
+          const controller = new AbortController();
+
+          // Execute the task with timeout and abort handling
+          // Entrypoint resolution happens in execution.ts via task discovery
           executeTask(
             db,
             instance.id,
             {
               id: task.id,
-              entryPoint: `file://${task.id}`, // Will be resolved properly in ticket 08
+              entryPoint: `file://${task.id}`, // Resolved by discovery in execution
               timeoutMs: task.timeout_ms,
             },
             input,
-            new AbortController().signal,
+            controller.signal,
             dbConfig.logDir,
+            () => controller.abort(),
           ).catch(err => {
             console.error(`Task execution error for instance ${instance.id}:`, err);
           });

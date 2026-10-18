@@ -47,7 +47,7 @@ export async function commandDaemon(
         return new Response("tq daemon running", { status: 200 });
       },
     });
-    actualPort = server.port;
+    actualPort = server.port ?? port;
   } catch (err: any) {
     console.error(`Error: cannot bind to port ${port}: ${err.message}`);
     return 1;

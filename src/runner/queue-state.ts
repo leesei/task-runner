@@ -22,6 +22,8 @@ import {
   getRunningInstances,
   updateInstanceState,
   getQueueCounts,
+  resetRunningInstancesToPending,
+  incrementAttempt,
 } from "../db/queries.ts";
 import type { QueueState, InstanceState } from "../db/schema.ts";
 
@@ -59,9 +61,10 @@ export function stopQueue(db: DB, queueId: string): boolean {
 }
 
 export function abortQueue(db: DB, queueId: string): boolean {
-  // First, signal all running instances (they'll be returned to PENDING)
+  // Signal all running instances: increment attempt, return to PENDING with partial log
   const running = getRunningInstances(db, queueId);
   for (const instance of running) {
+    incrementAttempt(db, instance.id);
     updateInstanceState(db, instance.id, "PENDING");
   }
   // Then stop the queue
@@ -82,7 +85,14 @@ export function checkDrained(db: DB, queueId: string): boolean {
 }
 
 export function autostartQueuesOnBoot(db: DB): { started: number; stayedStopped: number } {
-  const queues = db.query<{ id: string; state: string; concurrency: number }>(
+  // Crash recovery: reset any RUNNING instances to PENDING so they are retried.
+  // This handles the case where the daemon crashed or was killed while tasks were running.
+  const resetCount = resetRunningInstancesToPending(db);
+  if (resetCount > 0) {
+    console.log(`Crash recovery: reset ${resetCount} RUNNING instance(s) to PENDING`);
+  }
+
+  const queues = db.query<{ id: string; state: string; concurrency: number }, []>(
     "SELECT id, state, concurrency FROM queues ORDER BY id",
   ).all();
 
@@ -108,7 +118,7 @@ export function autostartQueuesOnBoot(db: DB): { started: number; stayedStopped:
 
 export function ensureQueuesForTasks(db: DB): void {
   // Ensure every task has a queue
-  const tasks = db.query<{ id: string; concurrency: number }>(
+  const tasks = db.query<{ id: string; concurrency: number }, []>(
     "SELECT id, concurrency FROM tasks",
   ).all();
 

@@ -21,19 +21,18 @@ import { commandReload } from "./commands/reload.ts";
 function findDaemonDescriptor(dataDir: string): { port: number; pid: number } | null {
   try {
     const path = `${dataDir}/daemon.json`;
-    const raw = Bun.file(path);
     // Synchronously read for CLI use
-    const text = Bun.file(path).textSync();
-    if (!text) return null;
-    return JSON.parse(text) as { port: number; pid: number };
+    const raw =require("node:fs").readFileSync(path, "utf-8");
+    if (!raw) return null;
+    return JSON.parse(raw) as { port: number; pid: number };
   } catch {
     return null;
   }
 }
 
-function probeDaemon(port: number): boolean {
+async function probeDaemon(port: number): Promise<boolean> {
   try {
-    const res = Bun.fetch(`http://localhost:${port}/api/health`, {
+    const res = await Bun.fetch(`http://localhost:${port}/api/health`, {
       signal: AbortSignal.timeout(2000),
     });
     return res.ok;
@@ -75,7 +74,7 @@ export async function main(args: string[]): Promise<number> {
   // Discover daemon
   const descriptor = findDaemonDescriptor(dataDir);
   let daemonPort = descriptor?.port ?? null;
-  if (daemonPort !== null && !probeDaemon(daemonPort)) {
+  if (daemonPort !== null && !(await probeDaemon(daemonPort))) {
     daemonPort = null;
   }
 
