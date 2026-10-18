@@ -94,6 +94,29 @@ function configureDatabase(db) {
 var init_database = () => {};
 
 // src/db/queries.ts
+function insertTask(db, task) {
+  db.run(`INSERT OR REPLACE INTO tasks
+     (id, namespace, name, description, category, concurrency, timeout_ms, input_schema, manifest_hash, manifest_warnings, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`, [
+    task.id,
+    task.namespace,
+    task.name,
+    task.description,
+    task.category ?? null,
+    task.concurrency,
+    task.timeout_ms,
+    task.input_schema ?? null,
+    task.manifest_hash ?? null,
+    task.manifest_warnings ?? null
+  ]);
+}
+function getTask(db, id) {
+  const row = db.query("SELECT * FROM tasks WHERE id = ?").get(id);
+  return row ?? null;
+}
+function ensureQueue(db, queueId, concurrency) {
+  db.run(`INSERT OR IGNORE INTO queues (id, state, concurrency) VALUES (?, 'IDLE', ?)`, [queueId, concurrency]);
+}
 function getAllQueues(db) {
   return db.query("SELECT * FROM queues ORDER BY id").all();
 }
@@ -214,6 +237,221 @@ Examples:
 
 // src/cli/commands/daemon.ts
 init_database();
+
+// src/tasks/discovery.ts
+import { readFileSync, readdirSync, existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+function parseManifest(path) {
+  try {
+    const raw = readFileSync(path, "utf-8");
+    return JSON.parse(raw);
+  } catch (err) {
+    return null;
+  }
+}
+function resolveTaskDir(taskDir) {
+  const settingsPath = join(taskDir, "settings.json");
+  const indexPath = join(taskDir, "index.ts");
+  const readmePath = join(taskDir, "README.md");
+  if (!existsSync(settingsPath))
+    return null;
+  if (!existsSync(indexPath))
+    return null;
+  if (!existsSync(readmePath))
+    return null;
+  const manifest = parseManifest(settingsPath);
+  if (!manifest || !manifest.id)
+    return null;
+  const namespace = manifest.namespace ?? "default";
+  const id = `${namespace}:${manifest.id}`;
+  let schemaPath = null;
+  if (manifest.inputSchema) {
+    const schemaCandidate = join(taskDir, manifest.inputSchema);
+    if (existsSync(schemaCandidate)) {
+      schemaPath = schemaCandidate;
+    }
+  }
+  return {
+    id,
+    manifest,
+    entryPoint: join(taskDir, "index.ts"),
+    schemaPath,
+    warnings: []
+  };
+}
+function discoverProjectTasks(projectRoot) {
+  const tasksDir = join(projectRoot, "tasks");
+  if (!existsSync(tasksDir))
+    return [];
+  const entries = readdirSync(tasksDir, { withFileTypes: true });
+  const tasks = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory())
+      continue;
+    const taskDir = join(tasksDir, entry.name);
+    const discovered = resolveTaskDir(taskDir);
+    if (discovered) {
+      tasks.push(discovered);
+    }
+  }
+  return tasks;
+}
+function discoverUserTasks() {
+  const userTasksDir = join(homedir(), ".tq", "tasks");
+  if (!existsSync(userTasksDir))
+    return [];
+  const entries = readdirSync(userTasksDir, { withFileTypes: true });
+  const tasks = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory())
+      continue;
+    const taskDir = join(userTasksDir, entry.name);
+    const discovered = resolveTaskDir(taskDir);
+    if (discovered) {
+      tasks.push(discovered);
+    }
+  }
+  return tasks;
+}
+function discoverPackageTasks(locations) {
+  const tasks = [];
+  for (const loc of locations) {
+    if (!existsSync(loc.tasksDir))
+      continue;
+    const entries = readdirSync(loc.tasksDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory())
+        continue;
+      const taskDir = join(loc.tasksDir, entry.name);
+      const discovered = resolveTaskDir(taskDir);
+      if (discovered) {
+        discovered.id = `${loc.namespace}:${discovered.manifest.id}`;
+        tasks.push(discovered);
+      }
+    }
+  }
+  return tasks;
+}
+function discoverAllTasks(projectRoot, db, packageLocations = []) {
+  const warnings = [];
+  const seen = new Map;
+  const tasks = [];
+  const projectTasks = discoverProjectTasks(projectRoot);
+  for (const task of projectTasks) {
+    const existing = seen.get(task.id);
+    if (existing) {
+      warnings.push(`Task ${task.id} from project shadows ${existing} (skipped)`);
+      continue;
+    }
+    seen.set(task.id, "project");
+    tasks.push(task);
+  }
+  const userTasks = discoverUserTasks();
+  for (const task of userTasks) {
+    const existing = seen.get(task.id);
+    if (existing && existing !== "project") {
+      warnings.push(`Task ${task.id} from user folder shadows ${existing} (skipped)`);
+      continue;
+    }
+    if (existing === "project") {
+      continue;
+    }
+    seen.set(task.id, "user");
+    tasks.push(task);
+  }
+  const packageTasks = discoverPackageTasks(packageLocations);
+  for (const task of packageTasks) {
+    const existing = seen.get(task.id);
+    if (existing) {
+      warnings.push(`Task ${task.id} from package ${task.manifest.name || "unknown"} shadows ${existing} (skipped)`);
+      continue;
+    }
+    seen.set(task.id, "package");
+    tasks.push(task);
+  }
+  return { tasks, warnings };
+}
+function loadTaskIntoDatabase(db, task) {
+  const existing = getTask(db, task.id);
+  if (existing) {
+    const manifestJson = JSON.stringify(task.manifest);
+    if (existing.manifest_hash !== manifestJson) {
+      task.warnings.push(`Task ${task.id} manifest updated`);
+    }
+  }
+  let inputSchema = null;
+  if (task.schemaPath) {
+    try {
+      inputSchema = readFileSync(task.schemaPath, "utf-8");
+    } catch {
+      task.warnings.push(`Task ${task.id}: cannot read schema file`);
+    }
+  }
+  insertTask(db, {
+    id: task.id,
+    namespace: task.manifest.namespace ?? "default",
+    name: task.manifest.name ?? task.manifest.id,
+    description: task.manifest.description ?? "",
+    category: task.manifest.category ?? null,
+    concurrency: task.manifest.concurrency ?? 1,
+    timeout_ms: task.manifest.timeoutMs ?? 1800000,
+    input_schema: inputSchema,
+    manifest_hash: JSON.stringify(task.manifest),
+    manifest_warnings: task.warnings.length > 0 ? JSON.stringify(task.warnings) : null
+  });
+  ensureQueue(db, task.id, task.manifest.concurrency ?? 1);
+  return true;
+}
+function loadAllTasks(db, projectRoot, packageLocations = []) {
+  const result = discoverAllTasks(projectRoot, db, packageLocations);
+  let loaded = 0;
+  for (const task of result.tasks) {
+    loadTaskIntoDatabase(db, task);
+    loaded++;
+  }
+  const allWarnings = [...result.warnings];
+  for (const task of result.tasks) {
+    if (task.warnings.length > 0) {
+      const existing = allWarnings.find((w) => w.includes(task.id));
+      if (!existing) {
+        allWarnings.push(...task.warnings);
+      }
+    }
+  }
+  const failedTasks = discoverAllTasks(projectRoot, db, packageLocations);
+  return { loaded, warnings: allWarnings };
+}
+
+// src/tasks/lockfile.ts
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync2 } from "fs";
+import { join as join2 } from "path";
+var LOCKFILE_VERSION = 1;
+function getLockfilePath(dataDir) {
+  return join2(dataDir, "packages.lock");
+}
+function readLockfile(dataDir) {
+  const path = getLockfilePath(dataDir);
+  if (!existsSync2(path)) {
+    return { packages: [], version: LOCKFILE_VERSION };
+  }
+  try {
+    const raw = readFileSync2(path, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return { packages: [], version: LOCKFILE_VERSION };
+  }
+}
+function getPackageLocations(dataDir) {
+  const lockfile = readLockfile(dataDir);
+  return lockfile.packages.map((p) => ({
+    name: p.name,
+    tasksDir: p.tasksDir,
+    namespace: p.namespace
+  }));
+}
+
+// src/cli/commands/daemon.ts
 async function commandDaemon(dataDir, port, flags) {
   const fs = __require("fs");
   const dbConfig = resolveDataDir(dataDir);
@@ -255,6 +493,13 @@ async function commandDaemon(dataDir, port, flags) {
   console.log(`tq daemon running on http://localhost:${actualPort}`);
   console.log(`Data directory: ${dataDir}`);
   console.log("Press Ctrl+C to stop");
+  const cwd = process.cwd();
+  const packageLocations = getPackageLocations(dataDir);
+  const { loaded, warnings } = loadAllTasks(db, cwd, packageLocations);
+  console.log(`Loaded ${loaded} task(s)`);
+  for (const warning of warnings) {
+    console.warn(`Warning: ${warning}`);
+  }
   const descriptorPath = `${dataDir}/daemon.json`;
   const controller = new AbortController;
   const shutdown = () => {
