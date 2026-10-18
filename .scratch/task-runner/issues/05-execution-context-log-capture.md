@@ -4,7 +4,7 @@
 
 **Blocked by:** 04
 
-**Status:** in-progress
+**Status:** resolved
 
 - [ ] ExecutionContext shape: `{ input: TInput, signal: AbortSignal, done: (exitCode: number) => void }`
 - [ ] Runner calls task's default export, awaits it; completion without `done` → exit code 0
