@@ -1,0 +1,342 @@
+#!/usr/bin/env bun
+// @bun
+var __require = import.meta.require;
+
+// src/cli/args.ts
+function parseArgs(args) {
+  const flags = {};
+  const positional = [];
+  let i = 0;
+  if (args.length > i)
+    i++;
+  if (args.length > i && (args[i].includes("/") || args[i].includes("\\")))
+    i++;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === "--help" || arg === "-h") {
+      flags["help"] = true;
+      i++;
+    } else if (arg.startsWith("--")) {
+      const eqIdx = arg.indexOf("=");
+      if (eqIdx >= 0) {
+        const key = arg.slice(2, eqIdx);
+        const value = arg.slice(eqIdx + 1);
+        flags[key] = value;
+        i++;
+      } else {
+        const key = arg.slice(2);
+        const next = args[i + 1];
+        if (next && !next.startsWith("--")) {
+          flags[key] = next;
+          i += 2;
+        } else {
+          flags[key] = true;
+          i++;
+        }
+      }
+    } else {
+      positional.push(arg);
+      i++;
+    }
+  }
+  return { subcommands: positional, flags, positional, raw: args };
+}
+function getStringFlag(flags, name, envVar, defaultValue) {
+  if (flags[name] !== undefined && flags[name] !== true) {
+    return flags[name];
+  }
+  const env = process.env[envVar];
+  if (env !== undefined)
+    return env;
+  return defaultValue;
+}
+function printUsage() {
+  console.log(`
+tq \u2014 Task Runner CLI
+
+Usage:
+  tq daemon                  Start the daemon
+  tq add <task> [context]    Enqueue a task instance
+  tq start <queue>           Start draining a queue
+  tq stop <queue>            Stop a queue
+  tq abort <queue>           Abort running instances
+  tq clear [--all] <queue>   Clear finished instances
+  tq status                  Show queue status
+  tq logs <instance-id>      Show instance logs
+  tq install <package>       Install a task package
+  tq reload                  Reload task definitions
+
+Global flags:
+  --data-dir <path>   Data directory (default: .tq/, or TQ_DATA_DIR)
+  --port <port>       HTTP port (default: 3000, or TQ_PORT)
+  --help, -h          Show this help
+
+Environment variables:
+  TQ_DATA_DIR   Data directory path
+  TQ_PORT       HTTP port number
+`);
+}
+function printDaemonUsage() {
+  console.log(`
+tq daemon \u2014 Start the Task Runner daemon
+
+Starts the HTTP server, dashboard, and runner loop. Queues autostart on launch.
+
+Usage:
+  tq daemon [--data-dir <path>] [--port <port>]
+
+Flags:
+  --data-dir <path>   Data directory (default: .tq/ in cwd, or TQ_DATA_DIR)
+  --port <port>       HTTP port (default: 3000, or TQ_PORT). Use 0 for ephemeral.
+  --help, -h          Show this help
+
+The daemon writes a descriptor file (daemon.json) in the data directory with
+its pid, port, and start time. Other tq commands use this to find the daemon.
+
+Examples:
+  tq daemon                          # default: localhost:3000, .tq/
+  tq daemon --port 0                 # ephemeral port (for tests)
+  tq daemon --data-dir /tmp/tq       # custom data directory
+  TQ_PORT=8080 tq daemon             # via environment variable
+`);
+}
+
+// src/cli/commands/daemon.ts
+async function commandDaemon(dataDir, port, flags) {
+  const fs = __require("fs");
+  try {
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+  } catch (err) {
+    console.error(`Error creating data directory ${dataDir}: ${err.message}`);
+    return 1;
+  }
+  let actualPort = port;
+  let server;
+  try {
+    server = Bun.serve({
+      port,
+      fetch(req) {
+        return new Response("tq daemon running", { status: 200 });
+      }
+    });
+    actualPort = server.port;
+  } catch (err) {
+    console.error(`Error: cannot bind to port ${port}: ${err.message}`);
+    return 1;
+  }
+  const descriptor = {
+    pid: process.pid,
+    port: actualPort,
+    dataDir,
+    startedAt: new Date().toISOString()
+  };
+  fs.writeFileSync(`${dataDir}/daemon.json`, JSON.stringify(descriptor, null, 2));
+  console.log(`tq daemon running on http://localhost:${actualPort}`);
+  console.log(`Data directory: ${dataDir}`);
+  console.log("Press Ctrl+C to stop");
+  const descriptorPath = `${dataDir}/daemon.json`;
+  const controller = new AbortController;
+  const shutdown = () => {
+    console.error(`
+Shutting down...`);
+    try {
+      fs.unlinkSync(descriptorPath);
+    } catch {}
+    server.stop();
+    controller.abort();
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  await new Promise((resolve) => {
+    controller.signal.addEventListener("abort", () => {
+      resolve();
+    });
+  });
+  process.exit(0);
+}
+
+// src/cli/commands/add.ts
+async function commandAdd(_dataDir, _daemonPort, args, _flags) {
+  if (args.length === 0) {
+    console.error("Usage: tq add <task> [context]");
+    return 2;
+  }
+  const taskId = args[0];
+  console.log(`Task: ${taskId}`);
+  console.log("Instance ID: 0 (stub - real implementation in ticket 08/09)");
+  return 0;
+}
+
+// src/cli/commands/start.ts
+async function commandStart(_daemonPort, queueId, _flags) {
+  if (!queueId) {
+    console.error("Usage: tq start <queue>");
+    return 2;
+  }
+  console.log(`Start command stub for queue: ${queueId}`);
+  return 0;
+}
+
+// src/cli/commands/stop.ts
+async function commandStop(_daemonPort, queueId, _flags) {
+  if (!queueId) {
+    console.error("Usage: tq stop <queue>");
+    return 2;
+  }
+  console.log(`Stop command stub for queue: ${queueId}`);
+  return 0;
+}
+
+// src/cli/commands/abort.ts
+async function commandAbort(_daemonPort, queueId, _flags) {
+  if (!queueId) {
+    console.error("Usage: tq abort <queue>");
+    return 2;
+  }
+  console.log(`Abort command stub for queue: ${queueId}`);
+  return 0;
+}
+
+// src/cli/commands/clear.ts
+async function commandClear(_dataDir, _daemonPort, args, _flags) {
+  const all = args[0] === "--all";
+  const queueId = all ? args[1] : args[0];
+  if (!queueId) {
+    console.error("Usage: tq clear [--all] <queue>");
+    return 2;
+  }
+  console.log(`Clear command stub for queue: ${queueId}${all ? " (all)" : ""}`);
+  return 0;
+}
+
+// src/cli/commands/status.ts
+async function commandStatus(_dataDir, _daemonPort, _flags) {
+  console.log("Queue    State       Concurrency  Running  Pending");
+  console.log("----     -----       -----------  -------  -------");
+  console.log("(no queues \u2014 stub, real implementation in ticket 04/09)");
+  return 0;
+}
+
+// src/cli/commands/logs.ts
+async function commandLogs(_dataDir, _daemonPort, args, _flags) {
+  if (args.length === 0) {
+    console.error("Usage: tq logs <instance-id>");
+    return 2;
+  }
+  const instanceId = args[0];
+  console.log(`Log for instance ${instanceId}:`);
+  console.log("(no logs \u2014 stub, real implementation in ticket 05/09)");
+  return 0;
+}
+
+// src/cli/commands/install.ts
+async function commandInstall(_dataDir, _daemonPort, args, _flags) {
+  if (args.length === 0) {
+    console.error("Usage: tq install <package>");
+    return 2;
+  }
+  const packageName = args[0];
+  console.log(`Install command stub for package: ${packageName}`);
+  return 0;
+}
+
+// src/cli/commands/reload.ts
+async function commandReload(_daemonPort, _flags) {
+  console.log("Reload command stub \u2014 real implementation in ticket 08/09");
+  return 0;
+}
+
+// src/cli/index.ts
+function findDaemonDescriptor(dataDir) {
+  try {
+    const path = `${dataDir}/daemon.json`;
+    const raw = Bun.file(path);
+    const text = Bun.file(path).textSync();
+    if (!text)
+      return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+function probeDaemon(port) {
+  try {
+    const res = Bun.fetch(`http://localhost:${port}/api/health`, {
+      signal: AbortSignal.timeout(2000)
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+async function main(args) {
+  const parsed = parseArgs(args);
+  const dataDir = getStringFlag(parsed.flags, "data-dir", "TQ_DATA_DIR", ".tq");
+  const cmd = parsed.positional[0];
+  if (cmd === "daemon" && parsed.flags["help"] !== undefined) {
+    printDaemonUsage();
+    return 0;
+  }
+  if (parsed.flags["help"] !== undefined) {
+    printUsage();
+    return 0;
+  }
+  if (!cmd || cmd === "daemon") {
+    const port = parseInt(getStringFlag(parsed.flags, "port", "TQ_PORT", "3000"), 10);
+    return await commandDaemon(dataDir, port, parsed.flags);
+  }
+  const descriptor = findDaemonDescriptor(dataDir);
+  let daemonPort = descriptor?.port ?? null;
+  if (daemonPort !== null && !probeDaemon(daemonPort)) {
+    daemonPort = null;
+  }
+  switch (cmd) {
+    case "add":
+      return await commandAdd(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
+    case "start":
+      if (daemonPort === null) {
+        console.error("Error: daemon is not running. Start it with `tq daemon` first.");
+        return 1;
+      }
+      return await commandStart(daemonPort, parsed.positional[1], parsed.flags);
+    case "stop":
+      if (daemonPort === null) {
+        console.error("Error: daemon is not running. Start it with `tq daemon` first.");
+        return 1;
+      }
+      return await commandStop(daemonPort, parsed.positional[1], parsed.flags);
+    case "abort":
+      if (daemonPort === null) {
+        console.error("Error: daemon is not running. Start it with `tq daemon` first.");
+        return 1;
+      }
+      return await commandAbort(daemonPort, parsed.positional[1], parsed.flags);
+    case "clear":
+      return await commandClear(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
+    case "status":
+      return await commandStatus(dataDir, daemonPort, parsed.flags);
+    case "logs":
+      return await commandLogs(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
+    case "install":
+      return await commandInstall(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
+    case "reload":
+      if (daemonPort === null) {
+        console.error("Error: daemon is not running. Start it with `tq daemon` first.");
+        return 1;
+      }
+      return await commandReload(daemonPort, parsed.flags);
+    default:
+      console.error(`Unknown command: ${cmd}`);
+      printUsage();
+      return 2;
+  }
+}
+if (import.meta.main) {
+  const exitCode = await main(process.argv);
+  process.exit(exitCode);
+}
+export {
+  main
+};
