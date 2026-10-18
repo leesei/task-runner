@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] `bun run build` produces a `tq` binary at the project root
 - [ ] `./tq --help` prints usage for all commands
