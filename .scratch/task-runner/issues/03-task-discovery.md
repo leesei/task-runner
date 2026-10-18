@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] Search path order: project `tasks/` > user task folder > installed-package locations (lockfile order)
 - [ ] Each task folder is read: `index.ts` entrypoint, `settings.json`, optional `inputSchema` file
