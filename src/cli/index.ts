@@ -83,23 +83,11 @@ export async function main(args: string[]): Promise<number> {
     case "add":
       return await commandAdd(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
     case "start":
-      if (daemonPort === null) {
-        console.error("Error: daemon is not running. Start it with `tq daemon` first.");
-        return 1;
-      }
-      return await commandStart(daemonPort, parsed.positional[1], parsed.flags);
+      return await commandStart(daemonPort, parsed.positional[1], parsed.flags, dataDir);
     case "stop":
-      if (daemonPort === null) {
-        console.error("Error: daemon is not running. Start it with `tq daemon` first.");
-        return 1;
-      }
-      return await commandStop(daemonPort, parsed.positional[1], parsed.flags);
+      return await commandStop(daemonPort, parsed.positional[1], parsed.flags, dataDir);
     case "abort":
-      if (daemonPort === null) {
-        console.error("Error: daemon is not running. Start it with `tq daemon` first.");
-        return 1;
-      }
-      return await commandAbort(daemonPort, parsed.positional[1], parsed.flags);
+      return await commandAbort(daemonPort, parsed.positional[1], parsed.flags, dataDir);
     case "clear":
       return await commandClear(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
     case "status":
