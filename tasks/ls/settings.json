@@ -1,0 +1,13 @@
+{
+  "namespace": "default",
+  "id": "ls",
+  "name": "List directory",
+  "description": "List the contents of a directory",
+  "concurrency": 4,
+  "inputSchema": "schema.json",
+  "env": {},
+  "agents": {
+    "daemon": { "logPath": "../logs" },
+    "cli": { "argumentHint": "<directory>", "example": "tq add default:ls fixture/1" }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "filepath": { "type": "string", "description": "Path to the file to print" },
+    "limit": { "type": "integer", "description": "Maximum number of lines to print", "default": 0 }
+  },
+  "required": ["filepath"]
+}

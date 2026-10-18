@@ -1,0 +1,14 @@
+{
+  "namespace": "default",
+  "id": "sha256",
+  "name": "SHA-256 hash",
+  "description": "Compute the SHA-256 digest of a file",
+  "concurrency": 2,
+  "inputSchema": "schema.json",
+  "env": {},
+  "category": "fs",
+  "agents": {
+    "daemon": { "logPath": "../logs" },
+    "cli": { "argumentHint": "<filepath>", "example": "tq add default:sha256 fixture/1/1.srt" }
+  }
+}

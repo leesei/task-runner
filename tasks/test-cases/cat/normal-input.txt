@@ -1,0 +1,4 @@
+This is a normal text file.
+It has multiple lines.
+None of them contain sensitive values.
+Just regular content.

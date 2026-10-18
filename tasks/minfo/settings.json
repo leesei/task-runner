@@ -1,0 +1,13 @@
+{
+  "namespace": "default",
+  "id": "minfo",
+  "name": "Media info",
+  "description": "Print media information for a video/audio file",
+  "concurrency": 1,
+  "inputSchema": "schema.json",
+  "env": {},
+  "agents": {
+    "daemon": { "logPath": "../logs" },
+    "cli": { "argumentHint": "<filepath>", "example": "tq add default:minfo fixture/1" }
+  }
+}

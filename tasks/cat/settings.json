@@ -1,0 +1,14 @@
+{
+  "namespace": "default",
+  "id": "cat",
+  "name": "Print file",
+  "description": "Print a file's contents, with sensitive values redacted",
+  "concurrency": 4,
+  "inputSchema": "schema.json",
+  "env": {},
+  "category": "fs",
+  "agents": {
+    "daemon": { "logPath": "../logs" },
+    "cli": { "argumentHint": "<filepath>", "example": "tq add default:cat fixture/1/1.srt" }
+  }
+}
