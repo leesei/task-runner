@@ -15,26 +15,31 @@ import {
 import {
   getPendingInstances,
   getRunningInstances,
-  updateInstanceState,
+  getTask,
 } from "../db/queries.ts";
+import { executeTask } from "./execution.ts";
+import { resolveDataDir } from "../db/database.ts";
 
 export interface RunnerConfig {
   pollIntervalMs: number;
+  dataDir: string;
 }
 
 const DEFAULT_CONFIG: RunnerConfig = {
   pollIntervalMs: 1000,
+  dataDir: ".tq",
 };
 
-export function createRunner(db: DB, config: Partial<RunnerConfig> = {}) {
+export function createRunner(config: Partial<RunnerConfig> = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
+  const dbConfig = resolveDataDir(cfg.dataDir);
 
   return {
     /**
      * Run one iteration of the runner loop.
      * Returns the number of instances launched.
      */
-    async runOnce(): Promise<number> {
+    async runOnce(db: DB): Promise<number> {
       let launched = 0;
 
       // Get all PROCESSING queues
@@ -57,8 +62,33 @@ export function createRunner(db: DB, config: Partial<RunnerConfig> = {}) {
 
         for (let i = 0; i < toLaunch; i++) {
           const instance = pending[i];
-          // Mark as RUNNING
-          updateInstanceState(db, instance.id, "RUNNING");
+          const task = getTask(db, queue.id);
+          if (!task) continue;
+
+          // Parse the input JSON
+          let input: unknown = {};
+          try {
+            input = JSON.parse(instance.input);
+          } catch {
+            input = instance.input;
+          }
+
+          // Execute the task
+          executeTask(
+            db,
+            instance.id,
+            {
+              id: task.id,
+              entryPoint: `file://${task.id}`, // Will be resolved properly in ticket 08
+              timeoutMs: task.timeout_ms,
+            },
+            input,
+            new AbortController().signal,
+            dbConfig.logDir,
+          ).catch(err => {
+            console.error(`Task execution error for instance ${instance.id}:`, err);
+          });
+
           launched++;
         }
       }
@@ -74,9 +104,9 @@ export function createRunner(db: DB, config: Partial<RunnerConfig> = {}) {
     /**
      * Run continuously, polling for work.
      */
-    async runContinuous(): Promise<void> {
+    async runContinuous(db: DB): Promise<void> {
       while (true) {
-        await this.runOnce();
+        await this.runOnce(db);
         await Bun.sleep(cfg.pollIntervalMs);
       }
     },

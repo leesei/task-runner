@@ -127,6 +127,10 @@ function getAllQueues(db) {
 function updateQueueState(db, id, state) {
   db.run("UPDATE queues SET state = ?, updated_at = datetime('now') WHERE id = ?", [state, id]);
 }
+function getInstance(db, id) {
+  const row = db.query("SELECT * FROM instances WHERE id = ?").get(id);
+  return row ?? null;
+}
 function getPendingInstances(db, queueId) {
   return db.query("SELECT * FROM instances WHERE task_id = ? AND state = 'PENDING' ORDER BY id ASC").all(queueId);
 }
@@ -506,15 +510,122 @@ function ensureQueuesForTasks(db) {
     ensureQueue(db, task.id, task.concurrency);
   }
 }
+// src/runner/execution.ts
+import { AsyncLocalStorage } from "async_hooks";
+// src/db/logs.ts
+function appendLog(db, instanceId, stream, text) {
+  const instance = getInstance(db, instanceId);
+  if (!instance?.log_path)
+    return;
+  const record = {
+    timestamp: new Date().toISOString(),
+    stream,
+    text
+  };
+  const fs = __require("fs");
+  fs.appendFileSync(instance.log_path, JSON.stringify(record) + `
+`);
+}
+function createLogFile(logDir, instanceId) {
+  const fs = __require("fs");
+  const logPath = `${logDir}/instance-${instanceId}.jsonl`;
+  fs.writeFileSync(logPath, "");
+  return logPath;
+}
+
+// src/runner/execution.ts
+var instanceStore = new AsyncLocalStorage;
+function runInInstanceContext(context, fn) {
+  return instanceStore.run(context, fn);
+}
+function getCurrentInstance() {
+  return instanceStore.getStore();
+}
+var originalLog = console.log;
+var originalError = console.error;
+var interceptionActive = false;
+function installConsoleInterception() {
+  if (interceptionActive)
+    return;
+  originalLog = console.log;
+  originalError = console.error;
+  console.log = function(...args) {
+    const ctx = getCurrentInstance();
+    const text = args.map((a) => String(a)).join(" ");
+    if (ctx) {
+      appendLog(ctx.db, ctx.instanceId, "stdout", text);
+    }
+    originalLog.call(console, ...args);
+  };
+  console.error = function(...args) {
+    const ctx = getCurrentInstance();
+    const text = args.map((a) => String(a)).join(" ");
+    if (ctx) {
+      appendLog(ctx.db, ctx.instanceId, "stderr", text);
+    }
+    originalError.call(console, ...args);
+  };
+  interceptionActive = true;
+}
+async function executeTask(db, instanceId, task, input, signal, logDir) {
+  const logPath = createLogFile(logDir, instanceId);
+  db.run("UPDATE instances SET log_path = ? WHERE id = ?", [logPath, instanceId]);
+  updateInstanceState(db, instanceId, "RUNNING");
+  let completed = false;
+  const ctx = {
+    input,
+    signal,
+    done: (exitCode) => {
+      if (completed) {
+        console.warn(`Instance ${instanceId}: second done() call ignored (exitCode was ${exitCode})`);
+        return;
+      }
+      completed = true;
+      if (exitCode === 0) {
+        updateInstanceState(db, instanceId, "SUCCESS");
+      } else {
+        updateInstanceState(db, instanceId, "FAILED", exitCode);
+      }
+    }
+  };
+  const result = await runInInstanceContext({ instanceId, db }, async () => {
+    const importPath = task.entryPoint;
+    const module = await import(importPath);
+    const taskFn = module.default;
+    if (!taskFn || typeof taskFn !== "function") {
+      console.error(`Task ${task.id}: no default export found`);
+      if (!completed) {
+        updateInstanceState(db, instanceId, "FAILED", 1, "no_default_export");
+      }
+      return;
+    }
+    try {
+      await taskFn(ctx);
+      if (!completed) {
+        updateInstanceState(db, instanceId, "SUCCESS");
+      }
+    } catch (err) {
+      if (!completed) {
+        const message = err?.message ?? String(err);
+        console.error(`Task ${task.id}: ${message}`);
+        updateInstanceState(db, instanceId, "FAILED", 1, message);
+      }
+    }
+  });
+  return result;
+}
 
 // src/runner/runner.ts
+init_database();
 var DEFAULT_CONFIG = {
-  pollIntervalMs: 1000
+  pollIntervalMs: 1000,
+  dataDir: ".tq"
 };
-function createRunner(db, config = {}) {
+function createRunner(config = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
+  const dbConfig = resolveDataDir(cfg.dataDir);
   return {
-    async runOnce() {
+    async runOnce(db) {
       let launched = 0;
       const queues = db.query("SELECT id, concurrency FROM queues WHERE state = 'PROCESSING' ORDER BY id").all();
       for (const queue of queues) {
@@ -528,7 +639,22 @@ function createRunner(db, config = {}) {
         const toLaunch = Math.min(slotsAvailable, pending.length);
         for (let i = 0;i < toLaunch; i++) {
           const instance = pending[i];
-          updateInstanceState(db, instance.id, "RUNNING");
+          const task = getTask(db, queue.id);
+          if (!task)
+            continue;
+          let input = {};
+          try {
+            input = JSON.parse(instance.input);
+          } catch {
+            input = instance.input;
+          }
+          executeTask(db, instance.id, {
+            id: task.id,
+            entryPoint: `file://${task.id}`,
+            timeoutMs: task.timeout_ms
+          }, input, new AbortController().signal, dbConfig.logDir).catch((err) => {
+            console.error(`Task execution error for instance ${instance.id}:`, err);
+          });
           launched++;
         }
       }
@@ -537,9 +663,9 @@ function createRunner(db, config = {}) {
       }
       return launched;
     },
-    async runContinuous() {
+    async runContinuous(db) {
       while (true) {
-        await this.runOnce();
+        await this.runOnce(db);
         await Bun.sleep(cfg.pollIntervalMs);
       }
     }
@@ -598,9 +724,10 @@ async function commandDaemon(dataDir, port, flags) {
   ensureQueuesForTasks(db);
   const { started, stayedStopped } = autostartQueuesOnBoot(db);
   console.log(`Autostart: ${started} queue(s) processing, ${stayedStopped} stayed stopped`);
-  const runner = createRunner(db);
+  installConsoleInterception();
+  const runner = createRunner({ dataDir });
   console.log("Runner loop started");
-  runner.runContinuous().catch((err) => {
+  runner.runContinuous(db).catch((err) => {
     console.error("Runner loop error:", err);
   });
   const descriptorPath = `${dataDir}/daemon.json`;

@@ -8,6 +8,7 @@ import { loadAllTasks } from "../../tasks/discovery.ts";
 import { getPackageLocations } from "../../tasks/lockfile.ts";
 import { autostartQueuesOnBoot, ensureQueuesForTasks } from "../../runner/queue-state.ts";
 import { createRunner } from "../../runner/runner.ts";
+import { installConsoleInterception } from "../../runner/execution.ts";
 
 export async function commandDaemon(
   dataDir: string,
@@ -82,12 +83,15 @@ export async function commandDaemon(
   const { started, stayedStopped } = autostartQueuesOnBoot(db);
   console.log(`Autostart: ${started} queue(s) processing, ${stayedStopped} stayed stopped`);
 
+  // Install console interception for log capture
+  installConsoleInterception();
+
   // Start the runner loop
-  const runner = createRunner(db);
+  const runner = createRunner({ dataDir });
   console.log("Runner loop started");
 
   // Run runner in background
-  runner.runContinuous().catch(err => {
+  runner.runContinuous(db).catch(err => {
     console.error("Runner loop error:", err);
   });
 
