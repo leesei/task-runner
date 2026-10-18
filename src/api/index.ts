@@ -32,7 +32,7 @@ import {
   getInstance,
   insertInstance,
 } from "../db/queries.ts";
-import { mergeLogRecords, readLogFile } from "../db/logs.ts";
+import { readLogFile } from "../db/logs.ts";
 import { controlStart, controlStop, controlAbort } from "../control/queue-control.ts";
 import { loadAllTasks } from "../tasks/discovery.ts";
 import { getPackageLocations } from "../tasks/lockfile.ts";
