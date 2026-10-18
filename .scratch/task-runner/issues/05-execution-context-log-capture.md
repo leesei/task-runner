@@ -4,7 +4,7 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
 - [ ] ExecutionContext shape: `{ input: TInput, signal: AbortSignal, done: (exitCode: number) => void }`
 - [ ] Runner calls task's default export, awaits it; completion without `done` → exit code 0
