@@ -10,8 +10,8 @@ import type { TaskRow, QueueRow, InstanceRow, QueueState, InstanceState } from "
 export function insertTask(db: DB, task: Omit<TaskRow, "created_at" | "updated_at">): void {
   db.run(
     `INSERT OR REPLACE INTO tasks
-     (id, namespace, name, description, category, concurrency, timeout_ms, input_schema, manifest_hash, manifest_warnings, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+     (id, namespace, name, description, category, concurrency, timeout_ms, input_schema, manifest_hash, manifest_warnings, entry_point, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     [
       task.id,
       task.namespace,
@@ -23,6 +23,7 @@ export function insertTask(db: DB, task: Omit<TaskRow, "created_at" | "updated_a
       task.input_schema ?? null,
       task.manifest_hash ?? null,
       task.manifest_warnings ?? null,
+      task.entry_point ?? null,
     ],
   );
 }

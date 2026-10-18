@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   input_schema TEXT,             -- JSON schema string or null
   manifest_hash TEXT,            -- hash of settings.json for change detection
   manifest_warnings TEXT,        -- JSON array of warning messages
+  entry_point TEXT,              -- absolute path to index.ts entrypoint
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -71,6 +72,7 @@ export interface TaskRow {
   input_schema: string | null;
   manifest_hash: string | null;
   manifest_warnings: string | null;
+  entry_point: string | null;
   created_at: string;
   updated_at: string;
 }

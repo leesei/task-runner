@@ -90,13 +90,14 @@ export function createRunner(config: Partial<RunnerConfig> = {}) {
           const controller = new AbortController();
 
           // Execute the task with timeout and abort handling
-          // Entrypoint resolution happens in execution.ts via task discovery
+          // entrypoint is stored in the tasks table by discovery
+          const entryPoint = task.entry_point ?? `file://${task.id}`;
           executeTask(
             db,
             instance.id,
             {
               id: task.id,
-              entryPoint: `file://${task.id}`, // Resolved by discovery in execution
+              entryPoint,
               timeoutMs: task.timeout_ms,
             },
             input,

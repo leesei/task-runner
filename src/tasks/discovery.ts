@@ -241,6 +241,7 @@ export function loadTaskIntoDatabase(db: DB, task: DiscoveredTask): boolean {
     input_schema: inputSchema,
     manifest_hash: JSON.stringify(task.manifest),
     manifest_warnings: task.warnings.length > 0 ? JSON.stringify(task.warnings) : null,
+    entry_point: task.entryPoint,
   });
 
   // Ensure queue exists

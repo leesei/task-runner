@@ -47,4 +47,13 @@ export function configureDatabase(db: DB): void {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec("PRAGMA cache_size = -64000"); // 64MB cache
+
+  // Migration: add entry_point column to tasks table if missing
+  // IGNORE lets us attempt the ALTER without failing on new databases
+  // that already have the column from the CREATE TABLE.
+  try {
+    db.exec("ALTER TABLE tasks ADD COLUMN entry_point TEXT");
+  } catch {
+    // Column already exists or another non-fatal error — skip
+  }
 }
