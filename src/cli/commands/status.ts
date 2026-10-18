@@ -2,21 +2,18 @@
  * `tq status` command.
  *
  * Shows queue status. Works offline (direct SQLite) when daemon is not running.
+ * When daemon is reachable, could use API (ticket 08) but offline works fine.
  */
+import { openDatabase, closeDatabase } from "../../db/database.ts";
+import { getAllQueues, getQueueCounts, getTotalCounts } from "../../db/queries.ts";
+
 export async function commandStatus(
   dataDir: string,
-  daemonPort: number | null,
+  _daemonPort: number | null,
   _flags: Record<string, string | true>,
 ): Promise<number> {
-  // If daemon is reachable, use API (implemented in ticket 08/09)
-  if (daemonPort !== null) {
-    console.log("Status via daemon API (not yet implemented - ticket 08)");
-    return 0;
-  }
-
-  // Offline mode: read directly from SQLite
-  const { openDatabase, closeDatabase } = await import("../../db/database.ts");
-  const { getAllQueues, getQueueCounts, getTotalCounts } = await import("../../db/queries.ts");
+  // Always use offline mode for status (direct SQLite read)
+  // This works whether or not the daemon is running
 
   let db;
   try {
