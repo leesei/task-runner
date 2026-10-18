@@ -4,7 +4,7 @@
 
 **Blocked by:** 05
 
-**Status:** in-progress
+**Status:** resolved
 
 - [ ] `tq start <queue>`: queue enters PROCESSING, drains PENDING instances in enqueue order
 - [ ] `tq stop <queue>`: stops launching new instances, lets RUNNING finish, queue ends STOPPED
