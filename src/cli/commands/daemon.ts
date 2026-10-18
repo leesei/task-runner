@@ -3,6 +3,7 @@
  *
  * Starts the HTTP server, writes the descriptor, and waits for shutdown.
  */
+import { resolveDataDir, openDatabase, closeDatabase, bootstrapDataDir, configureDatabase } from "../../db/database.ts";
 
 export async function commandDaemon(
   dataDir: string,
@@ -11,13 +12,22 @@ export async function commandDaemon(
 ): Promise<number> {
   const fs = require("node:fs");
 
-  // Ensure data directory exists
+  // Bootstrap data directory (creates dir, log dir)
+  const dbConfig = resolveDataDir(dataDir);
   try {
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
+    bootstrapDataDir(dbConfig);
   } catch (err: any) {
     console.error(`Error creating data directory ${dataDir}: ${err.message}`);
+    return 1;
+  }
+
+  // Open database
+  let db;
+  try {
+    db = openDatabase(dbConfig.dbPath);
+    configureDatabase(db);
+  } catch (err: any) {
+    console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
@@ -58,6 +68,7 @@ export async function commandDaemon(
   const shutdown = () => {
     console.error("\nShutting down...");
     try { fs.unlinkSync(descriptorPath); } catch {}
+    if (db) closeDatabase(db);
     server.stop();
     controller.abort();
   };

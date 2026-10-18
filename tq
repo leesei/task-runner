@@ -1,6 +1,117 @@
 #!/usr/bin/env bun
 // @bun
+var __esm = (fn, res, err) => () => {
+  if (fn)
+    try {
+      res = fn(fn = 0);
+    } catch (e) {
+      err = [e];
+    }
+  if (err)
+    throw err[0];
+  return res;
+};
 var __require = import.meta.require;
+
+// src/db/schema.ts
+var SCHEMA = `
+-- Task definitions (discovered from search path)
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,           -- namespace:id
+  namespace TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  category TEXT,
+  concurrency INTEGER NOT NULL DEFAULT 1,
+  timeout_ms INTEGER NOT NULL DEFAULT 1800000,
+  input_schema TEXT,             -- JSON schema string or null
+  manifest_hash TEXT,            -- hash of settings.json for change detection
+  manifest_warnings TEXT,        -- JSON array of warning messages
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Queue state (one per task)
+CREATE TABLE IF NOT EXISTS queues (
+  id TEXT PRIMARY KEY,           -- = task id
+  state TEXT NOT NULL DEFAULT 'IDLE',  -- IDLE, PROCESSING, STOPPED
+  concurrency INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Task instances (the runs)
+CREATE TABLE IF NOT EXISTS instances (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  input TEXT NOT NULL,           -- JSON input
+  state TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING, RUNNING, SUCCESS, FAILED
+  attempt INTEGER NOT NULL DEFAULT 1,
+  exit_code INTEGER,
+  failure_reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  ended_at TEXT,
+  log_path TEXT,
+  duration_ms INTEGER
+);
+
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_instances_task_id ON instances(task_id);
+CREATE INDEX IF NOT EXISTS idx_instances_state ON instances(state);
+CREATE INDEX IF NOT EXISTS idx_instances_created_at ON instances(created_at);
+`;
+
+// src/db/database.ts
+import { Database } from "bun:sqlite";
+function resolveDataDir(dataDir) {
+  const dbPath = `${dataDir}/taskrunner.db`;
+  const logDir = `${dataDir}/logs`;
+  return { dataDir, dbPath, logDir };
+}
+function bootstrapDataDir(config) {
+  const fs = __require("fs");
+  if (!fs.existsSync(config.dataDir)) {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+  }
+  if (!fs.existsSync(config.logDir)) {
+    fs.mkdirSync(config.logDir, { recursive: true });
+  }
+}
+function openDatabase(dbPath) {
+  const db = new Database(dbPath);
+  db.exec(SCHEMA);
+  return db;
+}
+function closeDatabase(db) {
+  db.close();
+}
+function configureDatabase(db) {
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA synchronous = NORMAL");
+  db.exec("PRAGMA cache_size = -64000");
+}
+var init_database = () => {};
+
+// src/db/queries.ts
+function getAllQueues(db) {
+  return db.query("SELECT * FROM queues ORDER BY id").all();
+}
+function getQueueCounts(db, queueId) {
+  const running = db.query("SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'RUNNING'").get(queueId).count;
+  const pending = db.query("SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'PENDING'").get(queueId).count;
+  const succeeded = db.query("SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'SUCCESS'").get(queueId).count;
+  const failed = db.query("SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'FAILED'").get(queueId).count;
+  return { running, pending, succeeded, failed };
+}
+function getTotalCounts(db) {
+  const running = db.query("SELECT COUNT(*) as count FROM instances WHERE state = 'RUNNING'").get().count;
+  const pending = db.query("SELECT COUNT(*) as count FROM instances WHERE state = 'PENDING'").get().count;
+  const succeeded = db.query("SELECT COUNT(*) as count FROM instances WHERE state = 'SUCCESS'").get().count;
+  const failed = db.query("SELECT COUNT(*) as count FROM instances WHERE state = 'FAILED'").get().count;
+  const total = running + pending + succeeded + failed;
+  return { total, running, pending, succeeded, failed };
+}
 
 // src/cli/args.ts
 function parseArgs(args) {
@@ -102,14 +213,22 @@ Examples:
 }
 
 // src/cli/commands/daemon.ts
+init_database();
 async function commandDaemon(dataDir, port, flags) {
   const fs = __require("fs");
+  const dbConfig = resolveDataDir(dataDir);
   try {
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
+    bootstrapDataDir(dbConfig);
   } catch (err) {
     console.error(`Error creating data directory ${dataDir}: ${err.message}`);
+    return 1;
+  }
+  let db;
+  try {
+    db = openDatabase(dbConfig.dbPath);
+    configureDatabase(db);
+  } catch (err) {
+    console.error(`Error opening database: ${err.message}`);
     return 1;
   }
   let actualPort = port;
@@ -144,6 +263,8 @@ Shutting down...`);
     try {
       fs.unlinkSync(descriptorPath);
     } catch {}
+    if (db)
+      closeDatabase(db);
     server.stop();
     controller.abort();
   };
@@ -212,10 +333,42 @@ async function commandClear(_dataDir, _daemonPort, args, _flags) {
 }
 
 // src/cli/commands/status.ts
-async function commandStatus(_dataDir, _daemonPort, _flags) {
-  console.log("Queue    State       Concurrency  Running  Pending");
-  console.log("----     -----       -----------  -------  -------");
-  console.log("(no queues \u2014 stub, real implementation in ticket 04/09)");
+async function commandStatus(dataDir, daemonPort, _flags) {
+  if (daemonPort !== null) {
+    console.log("Status via daemon API (not yet implemented - ticket 08)");
+    return 0;
+  }
+  await Promise.resolve().then(() => init_database());
+  await Promise.resolve();
+  let db;
+  try {
+    db = openDatabase(`${dataDir}/taskrunner.db`);
+  } catch (err) {
+    if (err.message.includes("unable to open") || err.message.includes("no such file")) {
+      console.log("No database found. Run `tq daemon` first to create one.");
+      return 0;
+    }
+    console.error(`Error opening database: ${err.message}`);
+    return 1;
+  }
+  try {
+    const queues = getAllQueues(db);
+    const totals = getTotalCounts(db);
+    if (queues.length === 0) {
+      console.log("No queues registered.");
+      return 0;
+    }
+    console.log(`Queue      State       Concurrency  Running  Pending  Succeeded  Failed  Total`);
+    console.log(`----       -----       -----------  -------  -------  ---------  ------  -----`);
+    for (const queue of queues) {
+      const counts = getQueueCounts(db, queue.id);
+      console.log(`${queue.id.padEnd(10)} ${queue.state.padEnd(10)} ${String(queue.concurrency).padEnd(11)} ${String(counts.running).padEnd(7)} ${String(counts.pending).padEnd(7)} ${String(counts.succeeded).padEnd(9)} ${String(counts.failed).padEnd(6)} ${String(counts.running + counts.pending + counts.succeeded + counts.failed).padEnd(5)}`);
+    }
+    console.log(`
+Total: ${totals.total} instances (${totals.running} running, ${totals.pending} pending, ${totals.succeeded} succeeded, ${totals.failed} failed)`);
+  } finally {
+    closeDatabase(db);
+  }
   return 0;
 }
 
