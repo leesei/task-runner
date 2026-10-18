@@ -4,20 +4,59 @@
  * Shows queue status. Works offline (direct SQLite) when daemon is not running.
  * When daemon is reachable, could use API (ticket 08) but offline works fine.
  */
-import { openDatabase, closeDatabase } from "../../db/database.ts";
+import { resolveDataDir, openDatabase, closeDatabase } from "../../db/database.ts";
 import { getAllQueues, getQueueCounts, getTotalCounts } from "../../db/queries.ts";
 
 export async function commandStatus(
   dataDir: string,
-  _daemonPort: number | null,
+  daemonPort: number | null,
   _flags: Record<string, string | true>,
 ): Promise<number> {
-  // Always use offline mode for status (direct SQLite read)
-  // This works whether or not the daemon is running
+  // Try daemon API first; fall back to offline SQLite read
+  if (daemonPort !== null) {
+    try {
+      const res = await fetch(`http://localhost:${daemonPort}/api/queues`);
+      if (res.ok) {
+        const queues = (await res.json()) as Array<{
+          id: string;
+          state: string;
+          running: number;
+          pending: number;
+          succeeded: number;
+          failed: number;
+        }>;
+        console.log(`Status via daemon (port ${daemonPort}):`);
+        console.log(`Queue      State       Running  Pending  Succeeded  Failed`);
+        console.log(`----       -----       -------  -------  ---------  ------`);
+        for (const q of queues) {
+          console.log(
+            `${q.id.padEnd(10)} ${q.state.padEnd(10)} ` +
+            `${String(q.running).padEnd(7)} ` +
+            `${String(q.pending).padEnd(7)} ` +
+            `${String(q.succeeded).padEnd(9)} ` +
+            `${String(q.failed).padEnd(6)}`,
+          );
+        }
+        const total = {
+          total: queues.reduce((s, q) => s + q.running + q.pending + q.succeeded + q.failed, 0),
+          running: queues.reduce((s, q) => s + q.running, 0),
+          pending: queues.reduce((s, q) => s + q.pending, 0),
+          succeeded: queues.reduce((s, q) => s + q.succeeded, 0),
+          failed: queues.reduce((s, q) => s + q.failed, 0),
+        };
+        console.log(`\nTotal: ${total.total} instances (${total.running} running, ${total.pending} pending, ${total.succeeded} succeeded, ${total.failed} failed)`);
+        return 0;
+      }
+    } catch {
+      // Fall through to offline path
+    }
+  }
 
+  // Offline path: read DB directly
+  const dbConfig = resolveDataDir(dataDir);
   let db;
   try {
-    db = openDatabase(`${dataDir}/taskrunner.db`);
+    db = openDatabase(dbConfig.dbPath);
   } catch (err: any) {
     // Database may not exist yet — that's OK, no queues registered
     if (err.message.includes("unable to open") || err.message.includes("no such file")) {

@@ -1,11 +1,40 @@
 /**
  * `tq reload` command.
+ *
+ * Reloads task definitions from the search path.
+ * Requires the daemon to be running; sends POST /api/reload.
  */
 
 export async function commandReload(
-  _daemonPort: number,
+  daemonPort: number,
   _flags: Record<string, string | true>,
 ): Promise<number> {
-  console.log("Reload command stub — real implementation in ticket 08/09");
-  return 0;
+  if (daemonPort === null) {
+    console.error("Error: daemon is not running. Start it with `tq daemon` first.");
+    return 1;
+  }
+
+  try {
+    const res = await fetch(
+      `http://localhost:${daemonPort}/api/reload`,
+      { method: "POST" },
+    );
+    if (res.ok) {
+      const body = (await res.json()) as { reloaded: number; warnings: string[] };
+      console.log(`Reloaded ${body.reloaded} task(s)`);
+      if (body.warnings.length > 0) {
+        for (const w of body.warnings) {
+          console.warn(`Warning: ${w}`);
+        }
+      }
+      return 0;
+    }
+    const errBody = await res.text();
+    console.error(`Daemon returned ${res.status}: ${errBody}`);
+    return 3;
+  } catch (err: any) {
+    console.error(`Error: ${err.message}`);
+    return 1;
+  }
 }
+
