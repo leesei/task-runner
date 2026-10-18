@@ -93,7 +93,7 @@ export function insertInstance(
   db: DB,
   taskId: string,
   input: string,
-  logPath: string,
+  logPath: string | null,
 ): number {
   const stmt = db.prepare(
     `INSERT INTO instances (task_id, input, log_path) VALUES (?, ?, ?)`,

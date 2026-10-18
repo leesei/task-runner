@@ -26,6 +26,7 @@ import {
   getInstance,
   incrementAttempt,
 } from "../db/queries.ts";
+import { emitInstanceStateChanged } from "../api/index.ts";
 import type { InstanceState } from "../db/schema.ts";
 
 // ─── Execution Context ─────────────────────────────────────────────────────────
@@ -140,8 +141,10 @@ export async function executeTask(
 
       if (exitCode === 0) {
         updateInstanceState(db, instanceId, "SUCCESS");
+        emitInstanceStateChanged(instanceId, "SUCCESS");
       } else {
         updateInstanceState(db, instanceId, "FAILED", exitCode);
+        emitInstanceStateChanged(instanceId, "FAILED");
       }
     },
   };
@@ -179,6 +182,7 @@ export async function executeTask(
         console.error(`Task ${task.id}: no default export found`);
         if (!completed) {
           updateInstanceState(db, instanceId, "FAILED", 1, "no_default_export");
+          emitInstanceStateChanged(instanceId, "FAILED");
         }
         return;
       }
@@ -190,12 +194,14 @@ export async function executeTask(
         // If task returns without calling done, treat as success
         if (!completed) {
           updateInstanceState(db, instanceId, "SUCCESS");
+          emitInstanceStateChanged(instanceId, "SUCCESS");
         }
       } catch (err: any) {
         if (!completed) {
           const message = err?.message ?? String(err);
           console.error(`Task ${task.id}: ${message}`);
           updateInstanceState(db, instanceId, "FAILED", 1, message);
+          emitInstanceStateChanged(instanceId, "FAILED");
         }
       }
     },
