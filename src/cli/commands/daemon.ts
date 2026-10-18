@@ -6,6 +6,8 @@
 import { resolveDataDir, openDatabase, closeDatabase, bootstrapDataDir, configureDatabase } from "../../db/database.ts";
 import { loadAllTasks } from "../../tasks/discovery.ts";
 import { getPackageLocations } from "../../tasks/lockfile.ts";
+import { autostartQueuesOnBoot, ensureQueuesForTasks } from "../../runner/queue-state.ts";
+import { createRunner } from "../../runner/runner.ts";
 
 export async function commandDaemon(
   dataDir: string,
@@ -72,6 +74,22 @@ export async function commandDaemon(
   for (const warning of warnings) {
     console.warn(`Warning: ${warning}`);
   }
+
+  // Ensure queues exist for all tasks
+  ensureQueuesForTasks(db);
+
+  // Autostart queues (STOPPED stay STOPPED, others enter PROCESSING)
+  const { started, stayedStopped } = autostartQueuesOnBoot(db);
+  console.log(`Autostart: ${started} queue(s) processing, ${stayedStopped} stayed stopped`);
+
+  // Start the runner loop
+  const runner = createRunner(db);
+  console.log("Runner loop started");
+
+  // Run runner in background
+  runner.runContinuous().catch(err => {
+    console.error("Runner loop error:", err);
+  });
 
   // Handle shutdown
   const descriptorPath = `${dataDir}/daemon.json`;
