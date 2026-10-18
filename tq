@@ -117,8 +117,30 @@ function getTask(db, id) {
 function ensureQueue(db, queueId, concurrency) {
   db.run(`INSERT OR IGNORE INTO queues (id, state, concurrency) VALUES (?, 'IDLE', ?)`, [queueId, concurrency]);
 }
+function getQueue(db, id) {
+  const row = db.query("SELECT * FROM queues WHERE id = ?").get(id);
+  return row ?? null;
+}
 function getAllQueues(db) {
   return db.query("SELECT * FROM queues ORDER BY id").all();
+}
+function updateQueueState(db, id, state) {
+  db.run("UPDATE queues SET state = ?, updated_at = datetime('now') WHERE id = ?", [state, id]);
+}
+function getPendingInstances(db, queueId) {
+  return db.query("SELECT * FROM instances WHERE task_id = ? AND state = 'PENDING' ORDER BY id ASC").all(queueId);
+}
+function getRunningInstances(db, queueId) {
+  const sql = queueId ? "SELECT * FROM instances WHERE state = 'RUNNING' AND task_id = ? ORDER BY id" : "SELECT * FROM instances WHERE state = 'RUNNING' ORDER BY id";
+  return queueId ? db.query(sql).all(queueId) : db.query(sql).all();
+}
+function updateInstanceState(db, id, state, exitCode, failureReason) {
+  const now = new Date().toISOString();
+  if (state === "RUNNING") {
+    db.run("UPDATE instances SET state = ?, started_at = ? WHERE id = ?", [state, now, id]);
+  } else {
+    db.run("UPDATE instances SET state = ?, ended_at = ?, exit_code = ?, failure_reason = ?, duration_ms = CASE WHEN started_at IS NOT NULL THEN CAST((julianday(datetime('now')) - julianday(started_at)) * 86400000 AS INTEGER) ELSE NULL END WHERE id = ?", [state, now, exitCode ?? null, failureReason ?? null, id]);
+  }
 }
 function getQueueCounts(db, queueId) {
   const running = db.query("SELECT COUNT(*) as count FROM instances WHERE task_id = ? AND state = 'RUNNING'").get(queueId).count;
@@ -450,6 +472,79 @@ function getPackageLocations(dataDir) {
     namespace: p.namespace
   }));
 }
+// src/runner/queue-state.ts
+function checkDrained(db, queueId) {
+  const queue = getQueue(db, queueId);
+  if (!queue || queue.state !== "PROCESSING")
+    return false;
+  const counts = getQueueCounts(db, queueId);
+  if (counts.running === 0 && counts.pending === 0) {
+    updateQueueState(db, queueId, "IDLE");
+    return true;
+  }
+  return false;
+}
+function autostartQueuesOnBoot(db) {
+  const queues = db.query("SELECT id, state, concurrency FROM queues ORDER BY id").all();
+  let started = 0;
+  let stayedStopped = 0;
+  for (const queue of queues) {
+    if (queue.state === "STOPPED") {
+      stayedStopped++;
+      continue;
+    }
+    if (queue.state !== "PROCESSING") {
+      updateQueueState(db, queue.id, "PROCESSING");
+    }
+    started++;
+  }
+  return { started, stayedStopped };
+}
+function ensureQueuesForTasks(db) {
+  const tasks = db.query("SELECT id, concurrency FROM tasks").all();
+  for (const task of tasks) {
+    ensureQueue(db, task.id, task.concurrency);
+  }
+}
+
+// src/runner/runner.ts
+var DEFAULT_CONFIG = {
+  pollIntervalMs: 1000
+};
+function createRunner(db, config = {}) {
+  const cfg = { ...DEFAULT_CONFIG, ...config };
+  return {
+    async runOnce() {
+      let launched = 0;
+      const queues = db.query("SELECT id, concurrency FROM queues WHERE state = 'PROCESSING' ORDER BY id").all();
+      for (const queue of queues) {
+        const running = getRunningInstances(db, queue.id);
+        if (running.length >= queue.concurrency)
+          continue;
+        const pending = getPendingInstances(db, queue.id);
+        if (pending.length === 0)
+          continue;
+        const slotsAvailable = queue.concurrency - running.length;
+        const toLaunch = Math.min(slotsAvailable, pending.length);
+        for (let i = 0;i < toLaunch; i++) {
+          const instance = pending[i];
+          updateInstanceState(db, instance.id, "RUNNING");
+          launched++;
+        }
+      }
+      for (const queue of queues) {
+        checkDrained(db, queue.id);
+      }
+      return launched;
+    },
+    async runContinuous() {
+      while (true) {
+        await this.runOnce();
+        await Bun.sleep(cfg.pollIntervalMs);
+      }
+    }
+  };
+}
 
 // src/cli/commands/daemon.ts
 async function commandDaemon(dataDir, port, flags) {
@@ -500,6 +595,14 @@ async function commandDaemon(dataDir, port, flags) {
   for (const warning of warnings) {
     console.warn(`Warning: ${warning}`);
   }
+  ensureQueuesForTasks(db);
+  const { started, stayedStopped } = autostartQueuesOnBoot(db);
+  console.log(`Autostart: ${started} queue(s) processing, ${stayedStopped} stayed stopped`);
+  const runner = createRunner(db);
+  console.log("Runner loop started");
+  runner.runContinuous().catch((err) => {
+    console.error("Runner loop error:", err);
+  });
   const descriptorPath = `${dataDir}/daemon.json`;
   const controller = new AbortController;
   const shutdown = () => {
