@@ -37,6 +37,10 @@ import { controlStart, controlStop, controlAbort } from "../control/queue-contro
 import { loadAllTasks } from "../tasks/discovery.ts";
 import { getPackageLocations } from "../tasks/lockfile.ts";
 import { ensureQueuesForTasks } from "../runner/queue-state.ts";
+import {
+  deleteSuccessInstances,
+  deleteFinishedInstances,
+} from "../db/queries.ts";
 import type { QueueState, InstanceState } from "../db/schema.ts";
 
 // ─── Structured errors ──────────────────────────────────────────────────────────
@@ -346,6 +350,36 @@ export function createApi(h: ApiHandlers) {
     );
   }
 
+  function handleClearQueue(queueId: string, all: boolean): Response {
+    const queue = getQueue(db, queueId);
+    if (!queue) {
+      return jsonError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`, 404);
+    }
+    if (all) {
+      const result = deleteFinishedInstances(db, queueId);
+      if (result.running_ids.length > 0) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            code: "CLEAR_REFUSED_RUNNING",
+            message: `Cannot clear --all: ${result.running_ids.length} instance(s) are RUNNING: ${result.running_ids.join(", ")}`,
+            runningIds: result.running_ids,
+          }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ success: true, deleted: result.deleted, queueId }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }
+    const deleted = deleteSuccessInstances(db, queueId);
+    return new Response(
+      JSON.stringify({ success: true, deleted, queueId }),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  }
+
   // ─── Router ──────────────────────────────────────────────────────────────────
 
   async function route(req: Request): Promise<Response> {
@@ -389,6 +423,8 @@ export function createApi(h: ApiHandlers) {
 
         if (subPath === "") {
           if (req.method === "GET") return handleQueueDetail(queueId);
+          if (req.method === "POST" && url.searchParams.get("clear") === "success") return handleClearQueue(queueId, false);
+          if (req.method === "POST" && url.searchParams.get("clear") === "all") return handleClearQueue(queueId, true);
           return jsonError("NOT_FOUND", `No handler for /api/queues/${queueId}`, 404);
         }
 

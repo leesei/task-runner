@@ -1,6 +1,67 @@
 #!/usr/bin/env bun
 // @bun
+var __esm = (fn, res, err) => () => {
+  if (fn)
+    try {
+      res = fn(fn = 0);
+    } catch (e) {
+      err = [e];
+    }
+  if (err)
+    throw err[0];
+  return res;
+};
 var __require = import.meta.require;
+
+// src/tasks/lockfile.ts
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync2 } from "fs";
+import { join as join2 } from "path";
+function getLockfilePath(dataDir) {
+  return join2(dataDir, "packages.lock");
+}
+function readLockfile(dataDir) {
+  const path = getLockfilePath(dataDir);
+  if (!existsSync2(path)) {
+    return { packages: [], version: LOCKFILE_VERSION };
+  }
+  try {
+    const raw = readFileSync2(path, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return { packages: [], version: LOCKFILE_VERSION };
+  }
+}
+function writeLockfile(dataDir, lockfile) {
+  const path = getLockfilePath(dataDir);
+  writeFileSync(path, JSON.stringify(lockfile, null, 2));
+}
+function addPackage(dataDir, name, version, tasksDir, namespace) {
+  const lockfile = readLockfile(dataDir);
+  const existingIdx = lockfile.packages.findIndex((p) => p.name === name);
+  const packageEntry = {
+    name,
+    version,
+    tasksDir,
+    namespace
+  };
+  if (existingIdx >= 0) {
+    lockfile.packages[existingIdx] = packageEntry;
+  } else {
+    lockfile.packages.push(packageEntry);
+  }
+  writeLockfile(dataDir, lockfile);
+  return lockfile;
+}
+function getPackageLocations(dataDir) {
+  const lockfile = readLockfile(dataDir);
+  return lockfile.packages.map((p) => ({
+    name: p.name,
+    tasksDir: p.tasksDir,
+    namespace: p.namespace
+  }));
+}
+var LOCKFILE_VERSION = 1;
+var init_lockfile = () => {};
 
 // src/cli/args.ts
 function parseArgs(args) {
@@ -118,6 +179,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   input_schema TEXT,             -- JSON schema string or null
   manifest_hash TEXT,            -- hash of settings.json for change detection
   manifest_warnings TEXT,        -- JSON array of warning messages
+  entry_point TEXT,              -- absolute path to index.ts entrypoint
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -180,6 +242,9 @@ function configureDatabase(db) {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec("PRAGMA cache_size = -64000");
+  try {
+    db.exec("ALTER TABLE tasks ADD COLUMN entry_point TEXT");
+  } catch {}
 }
 
 // src/tasks/discovery.ts
@@ -190,8 +255,8 @@ import { homedir } from "os";
 // src/db/queries.ts
 function insertTask(db, task) {
   db.run(`INSERT OR REPLACE INTO tasks
-     (id, namespace, name, description, category, concurrency, timeout_ms, input_schema, manifest_hash, manifest_warnings, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`, [
+     (id, namespace, name, description, category, concurrency, timeout_ms, input_schema, manifest_hash, manifest_warnings, entry_point, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`, [
     task.id,
     task.namespace,
     task.name,
@@ -201,12 +266,16 @@ function insertTask(db, task) {
     task.timeout_ms,
     task.input_schema ?? null,
     task.manifest_hash ?? null,
-    task.manifest_warnings ?? null
+    task.manifest_warnings ?? null,
+    task.entry_point ?? null
   ]);
 }
 function getTask(db, id) {
   const row = db.query("SELECT * FROM tasks WHERE id = ?").get(id);
   return row ?? null;
+}
+function getAllTasks(db) {
+  return db.query("SELECT * FROM tasks ORDER BY namespace, id").all();
 }
 function ensureQueue(db, queueId, concurrency) {
   db.run(`INSERT OR IGNORE INTO queues (id, state, concurrency) VALUES (?, 'IDLE', ?)`, [queueId, concurrency]);
@@ -221,9 +290,17 @@ function getAllQueues(db) {
 function updateQueueState(db, id, state) {
   db.run("UPDATE queues SET state = ?, updated_at = datetime('now') WHERE id = ?", [state, id]);
 }
+function insertInstance(db, taskId, input, logPath) {
+  const stmt = db.prepare(`INSERT INTO instances (task_id, input, log_path) VALUES (?, ?, ?)`);
+  const result = stmt.run(taskId, input, logPath);
+  return Number(result.lastInsertRowid ?? 0);
+}
 function getInstance(db, id) {
   const row = db.query("SELECT * FROM instances WHERE id = ?").get(id);
   return row ?? null;
+}
+function getInstancesByQueue(db, queueId) {
+  return db.query("SELECT * FROM instances WHERE task_id = ? ORDER BY id DESC").all(queueId);
 }
 function getPendingInstances(db, queueId) {
   return db.query("SELECT * FROM instances WHERE task_id = ? AND state = 'PENDING' ORDER BY id ASC").all(queueId);
@@ -239,6 +316,13 @@ function updateInstanceState(db, id, state, exitCode, failureReason) {
   } else {
     db.run("UPDATE instances SET state = ?, ended_at = ?, exit_code = ?, failure_reason = ?, duration_ms = CASE WHEN started_at IS NOT NULL THEN CAST((julianday(datetime('now')) - julianday(started_at)) * 86400000 AS INTEGER) ELSE NULL END WHERE id = ?", [state, now, exitCode ?? null, failureReason ?? null, id]);
   }
+}
+function resetRunningInstancesToPending(db) {
+  const result = db.run("UPDATE instances SET state = 'PENDING', started_at = NULL, exit_code = NULL, failure_reason = NULL WHERE state = 'RUNNING'");
+  return result.changes;
+}
+function incrementAttempt(db, instanceId) {
+  db.run("UPDATE instances SET attempt = attempt + 1 WHERE id = ?", [instanceId]);
 }
 function deleteSuccessInstances(db, queueId) {
   const rows = db.query("SELECT log_path FROM instances WHERE task_id = ? AND state = 'SUCCESS'").all(queueId);
@@ -443,7 +527,8 @@ function loadTaskIntoDatabase(db, task) {
     timeout_ms: task.manifest.timeoutMs ?? 1800000,
     input_schema: inputSchema,
     manifest_hash: JSON.stringify(task.manifest),
-    manifest_warnings: task.warnings.length > 0 ? JSON.stringify(task.warnings) : null
+    manifest_warnings: task.warnings.length > 0 ? JSON.stringify(task.warnings) : null,
+    entry_point: task.entryPoint
   });
   ensureQueue(db, task.id, task.manifest.concurrency ?? 1);
   return true;
@@ -468,33 +553,8 @@ function loadAllTasks(db, projectRoot, packageLocations = []) {
   return { loaded, warnings: allWarnings };
 }
 
-// src/tasks/lockfile.ts
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync2 } from "fs";
-import { join as join2 } from "path";
-var LOCKFILE_VERSION = 1;
-function getLockfilePath(dataDir) {
-  return join2(dataDir, "packages.lock");
-}
-function readLockfile(dataDir) {
-  const path = getLockfilePath(dataDir);
-  if (!existsSync2(path)) {
-    return { packages: [], version: LOCKFILE_VERSION };
-  }
-  try {
-    const raw = readFileSync2(path, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return { packages: [], version: LOCKFILE_VERSION };
-  }
-}
-function getPackageLocations(dataDir) {
-  const lockfile = readLockfile(dataDir);
-  return lockfile.packages.map((p) => ({
-    name: p.name,
-    tasksDir: p.tasksDir,
-    namespace: p.namespace
-  }));
-}
+// src/cli/commands/daemon.ts
+init_lockfile();
 
 // src/runner/queue-state.ts
 function transitionQueue(db, queueId, targetState) {
@@ -521,6 +581,7 @@ function stopQueue(db, queueId) {
 function abortQueue(db, queueId) {
   const running = getRunningInstances(db, queueId);
   for (const instance of running) {
+    incrementAttempt(db, instance.id);
     updateInstanceState(db, instance.id, "PENDING");
   }
   return transitionQueue(db, queueId, "STOPPED");
@@ -537,6 +598,10 @@ function checkDrained(db, queueId) {
   return false;
 }
 function autostartQueuesOnBoot(db) {
+  const resetCount = resetRunningInstancesToPending(db);
+  if (resetCount > 0) {
+    console.log(`Crash recovery: reset ${resetCount} RUNNING instance(s) to PENDING`);
+  }
   const queues = db.query("SELECT id, state, concurrency FROM queues ORDER BY id").all();
   let started = 0;
   let stayedStopped = 0;
@@ -576,242 +641,21 @@ function appendLog(db, instanceId, stream, text) {
   fs.appendFileSync(instance.log_path, JSON.stringify(record) + `
 `);
 }
+function readLogFile(logPath) {
+  const fs = __require("fs");
+  if (!fs.existsSync(logPath))
+    return [];
+  const content = fs.readFileSync(logPath, "utf-8");
+  if (!content.trim())
+    return [];
+  return content.split(`
+`).filter((line) => line.trim()).map((line) => JSON.parse(line));
+}
 function createLogFile(logDir, instanceId) {
   const fs = __require("fs");
   const logPath = `${logDir}/instance-${instanceId}.jsonl`;
   fs.writeFileSync(logPath, "");
   return logPath;
-}
-
-// src/runner/execution.ts
-var instanceStore = new AsyncLocalStorage;
-function runInInstanceContext(context, fn) {
-  return instanceStore.run(context, fn);
-}
-function getCurrentInstance() {
-  return instanceStore.getStore();
-}
-var originalLog = console.log;
-var originalError = console.error;
-var interceptionActive = false;
-function installConsoleInterception() {
-  if (interceptionActive)
-    return;
-  originalLog = console.log;
-  originalError = console.error;
-  console.log = function(...args) {
-    const ctx = getCurrentInstance();
-    const text = args.map((a) => String(a)).join(" ");
-    if (ctx) {
-      appendLog(ctx.db, ctx.instanceId, "stdout", text);
-    }
-    originalLog.call(console, ...args);
-  };
-  console.error = function(...args) {
-    const ctx = getCurrentInstance();
-    const text = args.map((a) => String(a)).join(" ");
-    if (ctx) {
-      appendLog(ctx.db, ctx.instanceId, "stderr", text);
-    }
-    originalError.call(console, ...args);
-  };
-  interceptionActive = true;
-}
-async function executeTask(db, instanceId, task, input, signal, logDir) {
-  const logPath = createLogFile(logDir, instanceId);
-  db.run("UPDATE instances SET log_path = ? WHERE id = ?", [logPath, instanceId]);
-  updateInstanceState(db, instanceId, "RUNNING");
-  let completed = false;
-  const ctx = {
-    input,
-    signal,
-    done: (exitCode) => {
-      if (completed) {
-        console.warn(`Instance ${instanceId}: second done() call ignored (exitCode was ${exitCode})`);
-        return;
-      }
-      completed = true;
-      if (exitCode === 0) {
-        updateInstanceState(db, instanceId, "SUCCESS");
-      } else {
-        updateInstanceState(db, instanceId, "FAILED", exitCode);
-      }
-    }
-  };
-  const result = await runInInstanceContext({ instanceId, db }, async () => {
-    const importPath = task.entryPoint;
-    const module = await import(importPath);
-    const taskFn = module.default;
-    if (!taskFn || typeof taskFn !== "function") {
-      console.error(`Task ${task.id}: no default export found`);
-      if (!completed) {
-        updateInstanceState(db, instanceId, "FAILED", 1, "no_default_export");
-      }
-      return;
-    }
-    try {
-      await taskFn(ctx);
-      if (!completed) {
-        updateInstanceState(db, instanceId, "SUCCESS");
-      }
-    } catch (err) {
-      if (!completed) {
-        const message = err?.message ?? String(err);
-        console.error(`Task ${task.id}: ${message}`);
-        updateInstanceState(db, instanceId, "FAILED", 1, message);
-      }
-    }
-  });
-  return result;
-}
-
-// src/runner/runner.ts
-var DEFAULT_CONFIG = {
-  pollIntervalMs: 1000,
-  dataDir: ".tq"
-};
-function createRunner(config = {}) {
-  const cfg = { ...DEFAULT_CONFIG, ...config };
-  const dbConfig = resolveDataDir(cfg.dataDir);
-  return {
-    async runOnce(db) {
-      let launched = 0;
-      const queues = db.query("SELECT id, concurrency FROM queues WHERE state = 'PROCESSING' ORDER BY id").all();
-      for (const queue of queues) {
-        const running = getRunningInstances(db, queue.id);
-        if (running.length >= queue.concurrency)
-          continue;
-        const pending = getPendingInstances(db, queue.id);
-        if (pending.length === 0)
-          continue;
-        const slotsAvailable = queue.concurrency - running.length;
-        const toLaunch = Math.min(slotsAvailable, pending.length);
-        for (let i = 0;i < toLaunch; i++) {
-          const instance = pending[i];
-          const task = getTask(db, queue.id);
-          if (!task)
-            continue;
-          let input = {};
-          try {
-            input = JSON.parse(instance.input);
-          } catch {
-            input = instance.input;
-          }
-          executeTask(db, instance.id, {
-            id: task.id,
-            entryPoint: `file://${task.id}`,
-            timeoutMs: task.timeout_ms
-          }, input, new AbortController().signal, dbConfig.logDir).catch((err) => {
-            console.error(`Task execution error for instance ${instance.id}:`, err);
-          });
-          launched++;
-        }
-      }
-      for (const queue of queues) {
-        checkDrained(db, queue.id);
-      }
-      return launched;
-    },
-    async runContinuous(db) {
-      while (true) {
-        await this.runOnce(db);
-        await Bun.sleep(cfg.pollIntervalMs);
-      }
-    }
-  };
-}
-
-// src/cli/commands/daemon.ts
-async function commandDaemon(dataDir, port, flags) {
-  const fs = __require("fs");
-  const dbConfig = resolveDataDir(dataDir);
-  try {
-    bootstrapDataDir(dbConfig);
-  } catch (err) {
-    console.error(`Error creating data directory ${dataDir}: ${err.message}`);
-    return 1;
-  }
-  let db;
-  try {
-    db = openDatabase(dbConfig.dbPath);
-    configureDatabase(db);
-  } catch (err) {
-    console.error(`Error opening database: ${err.message}`);
-    return 1;
-  }
-  let actualPort = port;
-  let server;
-  try {
-    server = Bun.serve({
-      port,
-      fetch(req) {
-        return new Response("tq daemon running", { status: 200 });
-      }
-    });
-    actualPort = server.port;
-  } catch (err) {
-    console.error(`Error: cannot bind to port ${port}: ${err.message}`);
-    return 1;
-  }
-  const descriptor = {
-    pid: process.pid,
-    port: actualPort,
-    dataDir,
-    startedAt: new Date().toISOString()
-  };
-  fs.writeFileSync(`${dataDir}/daemon.json`, JSON.stringify(descriptor, null, 2));
-  console.log(`tq daemon running on http://localhost:${actualPort}`);
-  console.log(`Data directory: ${dataDir}`);
-  console.log("Press Ctrl+C to stop");
-  const cwd = process.cwd();
-  const packageLocations = getPackageLocations(dataDir);
-  const { loaded, warnings } = loadAllTasks(db, cwd, packageLocations);
-  console.log(`Loaded ${loaded} task(s)`);
-  for (const warning of warnings) {
-    console.warn(`Warning: ${warning}`);
-  }
-  ensureQueuesForTasks(db);
-  const { started, stayedStopped } = autostartQueuesOnBoot(db);
-  console.log(`Autostart: ${started} queue(s) processing, ${stayedStopped} stayed stopped`);
-  installConsoleInterception();
-  const runner = createRunner({ dataDir });
-  console.log("Runner loop started");
-  runner.runContinuous(db).catch((err) => {
-    console.error("Runner loop error:", err);
-  });
-  const descriptorPath = `${dataDir}/daemon.json`;
-  const controller = new AbortController;
-  const shutdown = () => {
-    console.error(`
-Shutting down...`);
-    try {
-      fs.unlinkSync(descriptorPath);
-    } catch {}
-    if (db)
-      closeDatabase(db);
-    server.stop();
-    controller.abort();
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-  await new Promise((resolve) => {
-    controller.signal.addEventListener("abort", () => {
-      resolve();
-    });
-  });
-  process.exit(0);
-}
-
-// src/cli/commands/add.ts
-async function commandAdd(_dataDir, _daemonPort, args, _flags) {
-  if (args.length === 0) {
-    console.error("Usage: tq add <task> [context]");
-    return 2;
-  }
-  const taskId = args[0];
-  console.log(`Task: ${taskId}`);
-  console.log("Instance ID: 0 (stub - real implementation in ticket 08/09)");
-  return 0;
 }
 
 // src/control/queue-control.ts
@@ -899,108 +743,857 @@ function controlClear(db, queueId, all) {
   };
 }
 
+// src/api/index.ts
+init_lockfile();
+function jsonError(code, message, status) {
+  return new Response(JSON.stringify({ code, message }), { status, headers: { "Content-Type": "application/json" } });
+}
+var queueListeners = new Set;
+var instanceListeners = new Set;
+function emitQueueStateChanged(queueId, state) {
+  const evt = { type: "queueStateChanged", queueId, state };
+  for (const cb of queueListeners) {
+    try {
+      cb(evt);
+    } catch {}
+  }
+}
+function emitInstanceStateChanged(instanceId, state) {
+  const evt = { type: "instanceStateChanged", instanceId, state };
+  for (const cb of instanceListeners) {
+    try {
+      cb(evt);
+    } catch {}
+  }
+}
+function createApi(h) {
+  const db = h.db;
+  const dataDir = h.dataDir;
+  const cwd = h.cwd;
+  function handleHealth() {
+    const descriptorPath = `${dataDir}/daemon.json`;
+    let descriptor = null;
+    try {
+      const raw = __require("fs").readFileSync(descriptorPath, "utf-8");
+      descriptor = JSON.parse(raw);
+    } catch {}
+    return new Response(JSON.stringify({
+      status: "ok",
+      pid: descriptor?.pid ?? process.pid,
+      port: descriptor?.port ?? null,
+      dataDir,
+      startedAt: descriptor?.startedAt ?? null
+    }), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleQueues() {
+    const queues = getAllQueues(db);
+    const body = queues.map((q) => {
+      const counts = getQueueCounts(db, q.id);
+      return {
+        id: q.id,
+        state: q.state,
+        concurrency: q.concurrency,
+        running: counts.running,
+        pending: counts.pending,
+        succeeded: counts.succeeded,
+        failed: counts.failed
+      };
+    });
+    return new Response(JSON.stringify(body), {
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+  function handleQueueDetail(queueId) {
+    const queue = getQueue(db, queueId);
+    if (!queue) {
+      return jsonError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`, 404);
+    }
+    const counts = getQueueCounts(db, queueId);
+    return new Response(JSON.stringify({
+      id: queue.id,
+      state: queue.state,
+      concurrency: queue.concurrency,
+      running: counts.running,
+      pending: counts.pending,
+      succeeded: counts.succeeded,
+      failed: counts.failed
+    }), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleQueueInstances(queueId, stateFilter) {
+    const queue = getQueue(db, queueId);
+    if (!queue) {
+      return jsonError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`, 404);
+    }
+    let instances = getInstancesByQueue(db, queueId);
+    if (stateFilter && stateFilter !== "all") {
+      const validStates = ["PENDING", "RUNNING", "SUCCESS", "FAILED"];
+      if (!validStates.includes(stateFilter)) {
+        return jsonError("INVALID_STATE_FILTER", `Invalid state filter: ${stateFilter}. Valid: ${validStates.join(", ")}`, 400);
+      }
+      instances = instances.filter((i) => i.state === stateFilter);
+    }
+    return new Response(JSON.stringify(instances.map((i) => ({
+      id: i.id,
+      state: i.state,
+      exit_code: i.exit_code,
+      failure_reason: i.failure_reason,
+      attempt: i.attempt,
+      duration_ms: i.duration_ms,
+      created_at: i.created_at,
+      started_at: i.started_at,
+      ended_at: i.ended_at,
+      input: JSON.parse(i.input)
+    }))), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleStartQueue(queueId) {
+    const result = controlStart(db, queueId);
+    if (!result.success) {
+      if (result.message.includes("not found")) {
+        return jsonError("QUEUE_NOT_FOUND", result.message, 404);
+      }
+      return jsonError("INVALID_TRANSITION", result.message, 409);
+    }
+    emitQueueStateChanged(queueId, "PROCESSING");
+    return new Response(JSON.stringify({ success: true, message: result.message, state: result.queueState }), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleStopQueue(queueId) {
+    const result = controlStop(db, queueId);
+    if (!result.success) {
+      if (result.message.includes("not found")) {
+        return jsonError("QUEUE_NOT_FOUND", result.message, 404);
+      }
+      return jsonError("INVALID_TRANSITION", result.message, 409);
+    }
+    emitQueueStateChanged(queueId, "STOPPED");
+    return new Response(JSON.stringify({ success: true, message: result.message, state: result.queueState }), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleAbortQueue(queueId) {
+    const result = controlAbort(db, queueId);
+    if (!result.success) {
+      if (result.message.includes("not found")) {
+        return jsonError("QUEUE_NOT_FOUND", result.message, 404);
+      }
+      return jsonError("INVALID_TRANSITION", result.message, 409);
+    }
+    emitQueueStateChanged(queueId, "STOPPED");
+    for (const id of result.runningIds ?? []) {
+      emitInstanceStateChanged(id, "PENDING");
+    }
+    return new Response(JSON.stringify({
+      success: true,
+      message: result.message,
+      state: result.queueState,
+      returnedToPending: result.runningIds
+    }), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleTasks() {
+    const tasks = getAllTasks(db);
+    return new Response(JSON.stringify(tasks.map((t) => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      category: t.category,
+      concurrency: t.concurrency,
+      timeout_ms: t.timeout_ms,
+      has_schema: t.input_schema !== null
+    }))), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleEnqueueInstance(body) {
+    const task = getTask(db, body.task);
+    if (!task) {
+      return jsonError("TASK_NOT_FOUND", `Task not found: ${body.task}`, 404);
+    }
+    const inputJson = JSON.stringify(body.input);
+    const id = insertInstance(db, body.task, inputJson, null);
+    ensureQueuesForTasks(db);
+    return new Response(JSON.stringify({ id, task: body.task, input: body.input }), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleInstanceDetail(instanceId) {
+    const instance = getInstance(db, instanceId);
+    if (!instance) {
+      return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
+    }
+    return new Response(JSON.stringify({
+      id: instance.id,
+      task_id: instance.task_id,
+      state: instance.state,
+      exit_code: instance.exit_code,
+      failure_reason: instance.failure_reason,
+      attempt: instance.attempt,
+      duration_ms: instance.duration_ms,
+      created_at: instance.created_at,
+      started_at: instance.started_at,
+      ended_at: instance.ended_at,
+      input: JSON.parse(instance.input)
+    }), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleInstanceLog(instanceId) {
+    const instance = getInstance(db, instanceId);
+    if (!instance) {
+      return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
+    }
+    if (!instance.log_path) {
+      return new Response(JSON.stringify([]), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    const records = readLogFile(instance.log_path);
+    return new Response(JSON.stringify(records.map((r) => ({ ...r, text: r.text }))), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleReload() {
+    const packageLocations = getPackageLocations(dataDir);
+    const { loaded, warnings } = loadAllTasks(db, cwd, packageLocations);
+    ensureQueuesForTasks(db);
+    return new Response(JSON.stringify({ reloaded: loaded, warnings }), { headers: { "Content-Type": "application/json" } });
+  }
+  function handleClearQueue(queueId, all) {
+    const queue = getQueue(db, queueId);
+    if (!queue) {
+      return jsonError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`, 404);
+    }
+    if (all) {
+      const result = deleteFinishedInstances(db, queueId);
+      if (result.running_ids.length > 0) {
+        return new Response(JSON.stringify({
+          success: false,
+          code: "CLEAR_REFUSED_RUNNING",
+          message: `Cannot clear --all: ${result.running_ids.length} instance(s) are RUNNING: ${result.running_ids.join(", ")}`,
+          runningIds: result.running_ids
+        }), { status: 409, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ success: true, deleted: result.deleted, queueId }), { headers: { "Content-Type": "application/json" } });
+    }
+    const deleted = deleteSuccessInstances(db, queueId);
+    return new Response(JSON.stringify({ success: true, deleted, queueId }), { headers: { "Content-Type": "application/json" } });
+  }
+  async function route(req) {
+    const url = new URL(req.url);
+    const pathname = url.pathname;
+    try {
+      const apiPath = pathname.replace(/^\/api\//, "");
+      if (apiPath === "health") {
+        return req.method === "GET" ? handleHealth() : jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+      }
+      if (apiPath === "events") {
+        return req.method === "GET" ? handleEventsSSE(req) : jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+      }
+      if (apiPath === "tasks") {
+        return req.method === "GET" ? handleTasks() : jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+      }
+      if (apiPath === "reload") {
+        return req.method === "POST" ? handleReload() : jsonError("METHOD_NOT_ALLOWED", "Only POST allowed", 405);
+      }
+      if (apiPath === "queues") {
+        return req.method === "GET" ? handleQueues() : jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+      }
+      const queueMatch = apiPath.match(/^queues\/([^\/]+)((?:\/.*)?)$/);
+      if (queueMatch && queueMatch[1]) {
+        const queueId = decodeURIComponent(queueMatch[1]);
+        const subPath = queueMatch[2] ?? "";
+        if (subPath === "") {
+          if (req.method === "GET")
+            return handleQueueDetail(queueId);
+          if (req.method === "POST" && url.searchParams.get("clear") === "success")
+            return handleClearQueue(queueId, false);
+          if (req.method === "POST" && url.searchParams.get("clear") === "all")
+            return handleClearQueue(queueId, true);
+          return jsonError("NOT_FOUND", `No handler for /api/queues/${queueId}`, 404);
+        }
+        if (subPath === "/instances") {
+          if (req.method !== "GET")
+            return jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+          const stateFilter = url.searchParams.get("state");
+          return handleQueueInstances(queueId, stateFilter ?? undefined);
+        }
+        if (subPath === "/start") {
+          return req.method === "POST" ? handleStartQueue(queueId) : jsonError("METHOD_NOT_ALLOWED", "Only POST allowed", 405);
+        }
+        if (subPath === "/stop") {
+          return req.method === "POST" ? handleStopQueue(queueId) : jsonError("METHOD_NOT_ALLOWED", "Only POST allowed", 405);
+        }
+        if (subPath === "/abort") {
+          return req.method === "POST" ? handleAbortQueue(queueId) : jsonError("METHOD_NOT_ALLOWED", "Only POST allowed", 405);
+        }
+        return jsonError("NOT_FOUND", `Unknown queue sub-resource: ${subPath}`, 404);
+      }
+      if (apiPath === "instances") {
+        if (req.method === "POST")
+          return await handleEnqueue(req);
+        return jsonError("METHOD_NOT_ALLOWED", "Only POST allowed", 405);
+      }
+      const instanceMatch = apiPath.match(/^instances\/(\d+)((?:\/.*)?)$/);
+      if (instanceMatch && instanceMatch[1]) {
+        const instanceId = parseInt(instanceMatch[1], 10);
+        const subPath = instanceMatch[2] ?? "";
+        if (subPath === "") {
+          if (req.method === "GET")
+            return handleInstanceDetail(instanceId);
+          return jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+        }
+        if (subPath === "/log") {
+          if (req.method !== "GET")
+            return jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+          return handleInstanceLog(instanceId);
+        }
+        if (subPath === "/log/stream") {
+          if (req.method !== "GET")
+            return jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+          return handleLogStream(instanceId, req);
+        }
+        return jsonError("NOT_FOUND", `Unknown instance sub-resource: ${subPath}`, 404);
+      }
+      return jsonError("NOT_FOUND", `Unknown endpoint: ${pathname}`, 404);
+    } catch (err) {
+      return jsonError("INTERNAL_ERROR", err?.message ?? "Internal error", 500);
+    }
+  }
+  async function handleEnqueue(req) {
+    let body;
+    try {
+      const json = await req.json();
+      if (!json || typeof json.task !== "string") {
+        return jsonError("INVALID_REQUEST", "Request body must be { task: string, input: any }", 400);
+      }
+      body = json;
+    } catch {
+      return jsonError("INVALID_JSON", "Request body must be valid JSON", 400);
+    }
+    return handleEnqueueInstance(body);
+  }
+  function handleEventsSSE(req) {
+    const encoder = new TextEncoder;
+    let queueDone = false;
+    let instanceDone = false;
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`: connected
+
+`));
+        const onQueueEvent = (evt) => {
+          if (queueDone)
+            return;
+          try {
+            controller.enqueue(encoder.encode(`event: queueStateChanged
+data: ${JSON.stringify({ queueId: evt.queueId, state: evt.state })}
+
+`));
+          } catch {
+            queueDone = true;
+          }
+        };
+        const onInstanceEvent = (evt) => {
+          if (instanceDone)
+            return;
+          try {
+            controller.enqueue(encoder.encode(`event: instanceStateChanged
+data: ${JSON.stringify({ instanceId: evt.instanceId, state: evt.state })}
+
+`));
+          } catch {
+            instanceDone = true;
+          }
+        };
+        queueListeners.add(onQueueEvent);
+        instanceListeners.add(onInstanceEvent);
+        const onAbort = () => {
+          queueDone = true;
+          instanceDone = true;
+          queueListeners.delete(onQueueEvent);
+          instanceListeners.delete(onInstanceEvent);
+          try {
+            controller.close();
+          } catch {}
+        };
+        req.signal.addEventListener("abort", onAbort);
+      }
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive"
+      }
+    });
+  }
+  function handleLogStream(instanceId, req) {
+    const instance = getInstance(db, instanceId);
+    if (!instance) {
+      return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
+    }
+    const encoder = new TextEncoder;
+    let closed = false;
+    let lastIndex = 0;
+    const logPath = instance.log_path;
+    const stream = new ReadableStream({
+      start(controller) {
+        const pushExisting = () => {
+          if (closed || !logPath) {
+            try {
+              controller.close();
+            } catch {}
+            return;
+          }
+          try {
+            const records = readLogFile(logPath);
+            for (let i = lastIndex;i < records.length; i++) {
+              if (closed)
+                break;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ timestamp: records[i].timestamp, stream: records[i].stream, text: records[i].text })}
+
+`));
+              lastIndex = i + 1;
+            }
+          } catch {}
+          setTimeout(pushExisting, 500);
+        };
+        pushExisting();
+        const onAbort = () => {
+          closed = true;
+          try {
+            controller.close();
+          } catch {}
+        };
+        req.signal.addEventListener("abort", onAbort);
+      }
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive"
+      }
+    });
+  }
+  return route;
+}
+
+// src/runner/execution.ts
+var instanceStore = new AsyncLocalStorage;
+function runInInstanceContext(context, fn) {
+  return instanceStore.run(context, fn);
+}
+function getCurrentInstance() {
+  return instanceStore.getStore() ?? null;
+}
+var originalLog = console.log;
+var originalError = console.error;
+var interceptionActive = false;
+function installConsoleInterception() {
+  if (interceptionActive)
+    return;
+  originalLog = console.log;
+  originalError = console.error;
+  console.log = function(...args) {
+    const ctx = getCurrentInstance();
+    if (!ctx) {
+      originalLog.call(console, ...args);
+      return;
+    }
+    const text = args.map((a) => String(a)).join(" ");
+    appendLog(ctx.db, ctx.instanceId, "stdout", text);
+    originalLog.call(console, ...args);
+  };
+  console.error = function(...args) {
+    const ctx = getCurrentInstance();
+    if (!ctx) {
+      originalError.call(console, ...args);
+      return;
+    }
+    const text = args.map((a) => String(a)).join(" ");
+    appendLog(ctx.db, ctx.instanceId, "stderr", text);
+    originalError.call(console, ...args);
+  };
+  interceptionActive = true;
+}
+async function executeTask(db, instanceId, task, input, signal, logDir, abort) {
+  const logPath = createLogFile(logDir, instanceId);
+  db.run("UPDATE instances SET log_path = ? WHERE id = ?", [logPath, instanceId]);
+  let completed = false;
+  let timedOut = false;
+  const ctx = {
+    input,
+    signal,
+    done: (exitCode) => {
+      if (completed) {
+        console.warn(`Instance ${instanceId}: second done() call ignored (exitCode was ${exitCode})`);
+        return;
+      }
+      completed = true;
+      if (exitCode === 0) {
+        updateInstanceState(db, instanceId, "SUCCESS");
+        emitInstanceStateChanged(instanceId, "SUCCESS");
+      } else {
+        updateInstanceState(db, instanceId, "FAILED", exitCode);
+        emitInstanceStateChanged(instanceId, "FAILED");
+      }
+    }
+  };
+  if (task.timeoutMs > 0) {
+    const timeoutHandle = setTimeout(() => {
+      if (completed)
+        return;
+      timedOut = true;
+      completed = true;
+      updateInstanceState(db, instanceId, "FAILED", undefined, "timeout");
+      abort();
+    }, task.timeoutMs);
+    const originalDone = ctx.done;
+    ctx.done = (exitCode) => {
+      clearTimeout(timeoutHandle);
+      originalDone(exitCode);
+    };
+  }
+  const result = await runInInstanceContext({ instanceId, db }, async () => {
+    const importPath = task.entryPoint;
+    const module = await import(importPath);
+    const taskFn = module.default;
+    if (!taskFn || typeof taskFn !== "function") {
+      console.error(`Task ${task.id}: no default export found`);
+      if (!completed) {
+        updateInstanceState(db, instanceId, "FAILED", 1, "no_default_export");
+        emitInstanceStateChanged(instanceId, "FAILED");
+      }
+      return;
+    }
+    try {
+      await taskFn(ctx);
+      if (!completed) {
+        updateInstanceState(db, instanceId, "SUCCESS");
+        emitInstanceStateChanged(instanceId, "SUCCESS");
+      }
+    } catch (err) {
+      if (!completed) {
+        const message = err?.message ?? String(err);
+        console.error(`Task ${task.id}: ${message}`);
+        updateInstanceState(db, instanceId, "FAILED", 1, message);
+        emitInstanceStateChanged(instanceId, "FAILED");
+      }
+    }
+  });
+  return result;
+}
+
+// src/runner/runner.ts
+var DEFAULT_CONFIG = {
+  pollIntervalMs: 1000,
+  dataDir: ".tq"
+};
+function createRunner(config = {}) {
+  const cfg = { ...DEFAULT_CONFIG, ...config };
+  const dbConfig = resolveDataDir(cfg.dataDir);
+  return {
+    async runOnce(db) {
+      let launched = 0;
+      const queues = db.query("SELECT id, concurrency FROM queues WHERE state = 'PROCESSING' ORDER BY id").all();
+      for (const queue of queues) {
+        const running = getRunningInstances(db, queue.id);
+        if (running.length >= queue.concurrency)
+          continue;
+        const pending = getPendingInstances(db, queue.id);
+        if (pending.length === 0)
+          continue;
+        const slotsAvailable = queue.concurrency - running.length;
+        const toLaunch = Math.min(slotsAvailable, pending.length);
+        for (let i = 0;i < toLaunch; i++) {
+          const instance = pending[i];
+          if (!instance)
+            continue;
+          const task = getTask(db, queue.id);
+          if (!task)
+            continue;
+          let input = {};
+          try {
+            input = JSON.parse(instance.input);
+          } catch {
+            input = instance.input;
+          }
+          updateInstanceState(db, instance.id, "RUNNING");
+          const controller = new AbortController;
+          const entryPoint = task.entry_point ?? `file://${task.id}`;
+          executeTask(db, instance.id, {
+            id: task.id,
+            entryPoint,
+            timeoutMs: task.timeout_ms
+          }, input, controller.signal, dbConfig.logDir, () => controller.abort()).catch((err) => {
+            console.error(`Task execution error for instance ${instance.id}:`, err);
+          });
+          launched++;
+        }
+      }
+      for (const queue of queues) {
+        checkDrained(db, queue.id);
+      }
+      return launched;
+    },
+    async runContinuous(db) {
+      while (true) {
+        await this.runOnce(db);
+        await Bun.sleep(cfg.pollIntervalMs);
+      }
+    }
+  };
+}
+
+// src/cli/commands/daemon.ts
+async function commandDaemon(dataDir, port, flags) {
+  const fs = __require("fs");
+  const dbConfig = resolveDataDir(dataDir);
+  try {
+    bootstrapDataDir(dbConfig);
+  } catch (err) {
+    console.error(`Error creating data directory ${dataDir}: ${err.message}`);
+    return 1;
+  }
+  let db;
+  try {
+    db = openDatabase(dbConfig.dbPath);
+    configureDatabase(db);
+  } catch (err) {
+    console.error(`Error opening database: ${err.message}`);
+    return 1;
+  }
+  const cwd = process.cwd();
+  const packageLocations = getPackageLocations(dataDir);
+  const { loaded, warnings } = loadAllTasks(db, cwd, packageLocations);
+  console.log(`Loaded ${loaded} task(s)`);
+  for (const warning of warnings) {
+    console.warn(`Warning: ${warning}`);
+  }
+  ensureQueuesForTasks(db);
+  const { started, stayedStopped } = autostartQueuesOnBoot(db);
+  console.log(`Autostart: ${started} queue(s) processing, ${stayedStopped} stayed stopped`);
+  installConsoleInterception();
+  const apiRouter = createApi({ db, dataDir, cwd });
+  const runner = createRunner({ dataDir });
+  console.log("Runner loop started");
+  runner.runContinuous(db).catch((err) => {
+    console.error("Runner loop error:", err);
+  });
+  let actualPort = port;
+  let server;
+  try {
+    server = Bun.serve({
+      port,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname.startsWith("/api/") || url.pathname === "/api") {
+          return apiRouter(req);
+        }
+        return new Response(" tq dashboard (not yet implemented) ", {
+          status: 200,
+          headers: { "Content-Type": "text/html" }
+        });
+      }
+    });
+    actualPort = server.port ?? port;
+  } catch (err) {
+    console.error(`Error: cannot bind to port ${port}: ${err.message}`);
+    return 1;
+  }
+  const descriptor = {
+    pid: process.pid,
+    port: actualPort,
+    dataDir,
+    startedAt: new Date().toISOString()
+  };
+  fs.writeFileSync(`${dataDir}/daemon.json`, JSON.stringify(descriptor, null, 2));
+  console.log(`tq daemon running on http://localhost:${actualPort}`);
+  console.log(`Data directory: ${dataDir}`);
+  console.log("Press Ctrl+C to stop");
+  const descriptorPath = `${dataDir}/daemon.json`;
+  const controller = new AbortController;
+  const shutdown = () => {
+    console.error(`
+Shutting down...`);
+    try {
+      fs.unlinkSync(descriptorPath);
+    } catch {}
+    if (db)
+      closeDatabase(db);
+    server.stop();
+    controller.abort();
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  await new Promise((resolve) => {
+    controller.signal.addEventListener("abort", () => {
+      resolve();
+    });
+  });
+  process.exit(0);
+}
+
+// src/cli/commands/add.ts
+function makeInput(raw) {
+  if (!raw)
+    return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+async function commandAdd(dataDir, daemonPort, args, _flags) {
+  if (args.length === 0) {
+    console.error("Usage: tq add <task> [input]");
+    return 2;
+  }
+  const taskId = args[0];
+  const input = makeInput(args[1]);
+  const inputJson = JSON.stringify(input);
+  if (daemonPort !== null) {
+    try {
+      const res = await fetch(`http://localhost:${daemonPort}/api/instances`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: taskId, input })
+      });
+      if (res.ok) {
+        const body = await res.json();
+        console.log(`Enqueued instance ${body.id} on task ${body.task}`);
+        console.log(`Input: ${inputJson}`);
+        return 0;
+      }
+      const errBody = await res.text();
+      console.error(`Daemon returned ${res.status}: ${errBody}`);
+    } catch {}
+  }
+  const dbConfig = resolveDataDir(dataDir);
+  let db;
+  try {
+    db = openDatabase(dbConfig.dbPath);
+  } catch (err) {
+    console.error(`Error opening database: ${err.message}`);
+    return 1;
+  }
+  try {
+    const task = getTask(db, taskId);
+    if (!task) {
+      console.error(`Task not found: ${taskId}`);
+      return 2;
+    }
+    ensureQueuesForTasks(db);
+    const id = insertInstance(db, taskId, inputJson, null);
+    console.log(`Enqueued instance ${id} on task ${taskId}`);
+    console.log(`Input: ${inputJson}`);
+    console.log("Note: instance will be picked up when daemon processes the queue");
+    return 0;
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    return 1;
+  } finally {
+    closeDatabase(db);
+  }
+}
+
 // src/cli/commands/start.ts
-async function commandStart(daemonPort, queueId, _flags, dataDir) {
+async function commandStart(daemonPort, queueId, _flags, _dataDir) {
   if (!queueId) {
     console.error("Usage: tq start <queue>");
     return 2;
   }
   if (daemonPort === null) {
-    console.error("Warning: daemon not detected, operating on SQLite directly");
-  }
-  let db;
-  try {
-    db = openDatabase(`${dataDir}/taskrunner.db`);
-  } catch (err) {
-    console.error(`Error opening database: ${err.message}`);
+    console.error("Error: daemon is not running. Start it with `tq daemon` first.");
     return 1;
   }
   try {
-    const result = controlStart(db, queueId);
-    if (result.success) {
-      console.log(result.message);
+    const res = await fetch(`http://localhost:${daemonPort}/api/queues/${encodeURIComponent(queueId)}/start`, { method: "POST" });
+    if (res.ok) {
+      const body = await res.json();
+      console.log(body.message);
       return 0;
-    } else {
-      console.error(result.message);
-      return 1;
     }
-  } finally {
-    closeDatabase(db);
+    const errBody = await res.text();
+    console.error(`Daemon returned ${res.status}: ${errBody}`);
+    return 3;
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    return 1;
   }
 }
 
 // src/cli/commands/stop.ts
-async function commandStop(daemonPort, queueId, _flags, dataDir) {
+async function commandStop(daemonPort, queueId, _flags, _dataDir) {
   if (!queueId) {
     console.error("Usage: tq stop <queue>");
     return 2;
   }
   if (daemonPort === null) {
-    console.error("Warning: daemon not detected, operating on SQLite directly");
-  }
-  let db;
-  try {
-    db = openDatabase(`${dataDir}/taskrunner.db`);
-  } catch (err) {
-    console.error(`Error opening database: ${err.message}`);
+    console.error("Error: daemon is not running. Start it with `tq daemon` first.");
     return 1;
   }
   try {
-    const result = controlStop(db, queueId);
-    if (result.success) {
-      console.log(result.message);
+    const res = await fetch(`http://localhost:${daemonPort}/api/queues/${encodeURIComponent(queueId)}/stop`, { method: "POST" });
+    if (res.ok) {
+      const body = await res.json();
+      console.log(body.message);
       return 0;
-    } else {
-      console.error(result.message);
-      return 1;
     }
-  } finally {
-    closeDatabase(db);
+    const errBody = await res.text();
+    console.error(`Daemon returned ${res.status}: ${errBody}`);
+    return 3;
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    return 1;
   }
 }
 
 // src/cli/commands/abort.ts
-async function commandAbort(daemonPort, queueId, _flags, dataDir) {
+async function commandAbort(daemonPort, queueId, _flags, _dataDir) {
   if (!queueId) {
     console.error("Usage: tq abort <queue>");
     return 2;
   }
   if (daemonPort === null) {
-    console.error("Warning: daemon not detected, operating on SQLite directly");
-  }
-  let db;
-  try {
-    db = openDatabase(`${dataDir}/taskrunner.db`);
-  } catch (err) {
-    console.error(`Error opening database: ${err.message}`);
+    console.error("Error: daemon is not running. Start it with `tq daemon` first.");
     return 1;
   }
   try {
-    const result = controlAbort(db, queueId);
-    if (result.success) {
-      console.log(result.message);
+    const res = await fetch(`http://localhost:${daemonPort}/api/queues/${encodeURIComponent(queueId)}/abort`, { method: "POST" });
+    if (res.ok) {
+      const body = await res.json();
+      console.log(body.message);
+      if (body.returnedToPending?.length) {
+        console.log(`Returned ${body.returnedToPending.length} instance(s) to PENDING`);
+      }
       return 0;
-    } else {
-      console.error(result.message);
-      return 1;
     }
-  } finally {
-    closeDatabase(db);
+    const errBody = await res.text();
+    console.error(`Daemon returned ${res.status}: ${errBody}`);
+    return 3;
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    return 1;
   }
 }
 
 // src/cli/commands/clear.ts
-async function commandClear(_dataDir, daemonPort, args, _flags) {
+async function commandClear(dataDir, daemonPort, args, _flags) {
   const all = args[0] === "--all";
   const queueId = all ? args[1] : args[0];
   if (!queueId) {
     console.error("Usage: tq clear [--all] <queue>");
     return 2;
   }
-  const dataDir = process.env.TQ_DATA_DIR ?? _dataDir ?? ".tq";
+  if (daemonPort !== null) {
+    try {
+      const qs = all ? "?clear=all" : "?clear=success";
+      const res = await fetch(`http://localhost:${daemonPort}/api/queues/${encodeURIComponent(queueId)}${qs}`, { method: "POST" });
+      if (res.ok) {
+        const body = await res.json();
+        console.log(resultMessage(body, all));
+        if (body.deleted)
+          console.log(`Deleted ${body.deleted} log file(s)`);
+        return 0;
+      }
+      const errBody = await res.text();
+      console.error(`Daemon returned ${res.status}: ${errBody}`);
+    } catch {}
+  }
+  const dbConfig = resolveDataDir(dataDir);
   let db;
   try {
-    db = openDatabase(`${dataDir}/taskrunner.db`);
+    db = openDatabase(dbConfig.dbPath);
   } catch (err) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
@@ -1024,12 +1617,43 @@ async function commandClear(_dataDir, daemonPort, args, _flags) {
     closeDatabase(db);
   }
 }
+function resultMessage(body, all) {
+  if (all) {
+    return `Cleared ${body.deleted} finished instance(s) from ${body.queueId}`;
+  }
+  return `Cleared ${body.deleted} successful instance(s) from ${body.queueId}`;
+}
 
 // src/cli/commands/status.ts
-async function commandStatus(dataDir, _daemonPort, _flags) {
+async function commandStatus(dataDir, daemonPort, _flags) {
+  if (daemonPort !== null) {
+    try {
+      const res = await fetch(`http://localhost:${daemonPort}/api/queues`);
+      if (res.ok) {
+        const queues = await res.json();
+        console.log(`Status via daemon (port ${daemonPort}):`);
+        console.log(`Queue      State       Running  Pending  Succeeded  Failed`);
+        console.log(`----       -----       -------  -------  ---------  ------`);
+        for (const q of queues) {
+          console.log(`${q.id.padEnd(10)} ${q.state.padEnd(10)} ` + `${String(q.running).padEnd(7)} ` + `${String(q.pending).padEnd(7)} ` + `${String(q.succeeded).padEnd(9)} ` + `${String(q.failed).padEnd(6)}`);
+        }
+        const total = {
+          total: queues.reduce((s, q) => s + q.running + q.pending + q.succeeded + q.failed, 0),
+          running: queues.reduce((s, q) => s + q.running, 0),
+          pending: queues.reduce((s, q) => s + q.pending, 0),
+          succeeded: queues.reduce((s, q) => s + q.succeeded, 0),
+          failed: queues.reduce((s, q) => s + q.failed, 0)
+        };
+        console.log(`
+Total: ${total.total} instances (${total.running} running, ${total.pending} pending, ${total.succeeded} succeeded, ${total.failed} failed)`);
+        return 0;
+      }
+    } catch {}
+  }
+  const dbConfig = resolveDataDir(dataDir);
   let db;
   try {
-    db = openDatabase(`${dataDir}/taskrunner.db`);
+    db = openDatabase(dbConfig.dbPath);
   } catch (err) {
     if (err.message.includes("unable to open") || err.message.includes("no such file")) {
       console.log("No database found. Run `tq daemon` first to create one.");
@@ -1060,50 +1684,192 @@ Total: ${totals.total} instances (${totals.running} running, ${totals.pending} p
 }
 
 // src/cli/commands/logs.ts
-async function commandLogs(_dataDir, _daemonPort, args, _flags) {
+function printRecords(records) {
+  if (records.length === 0) {
+    console.log("(no logs)");
+    return;
+  }
+  for (const r of records) {
+    const stream = r.stream === "stderr" ? "[err] " : "      ";
+    console.log(`${r.timestamp} ${stream}${r.text}`);
+  }
+}
+async function commandLogs(dataDir, daemonPort, args, _flags) {
   if (args.length === 0) {
     console.error("Usage: tq logs <instance-id>");
     return 2;
   }
-  const instanceId = args[0];
-  console.log(`Log for instance ${instanceId}:`);
-  console.log("(no logs \u2014 stub, real implementation in ticket 05/09)");
-  return 0;
+  const instanceId = parseInt(args[0], 10);
+  if (isNaN(instanceId) || instanceId <= 0) {
+    console.error("Error: invalid instance id");
+    return 2;
+  }
+  if (daemonPort !== null) {
+    try {
+      const res = await fetch(`http://localhost:${daemonPort}/api/instances/${instanceId}/log`);
+      if (res.ok) {
+        const records = await res.json();
+        console.log(`Logs for instance ${instanceId}:`);
+        printRecords(records);
+        return 0;
+      }
+      const errBody = await res.text();
+      console.error(`Daemon returned ${res.status}: ${errBody}`);
+      return 3;
+    } catch {}
+  }
+  const dbConfig = resolveDataDir(dataDir);
+  let db;
+  try {
+    db = openDatabase(dbConfig.dbPath);
+  } catch (err) {
+    console.error(`Error opening database: ${err.message}`);
+    return 1;
+  }
+  try {
+    const instance = getInstance(db, instanceId);
+    if (!instance) {
+      console.error(`Instance not found: ${instanceId}`);
+      return 2;
+    }
+    if (!instance.log_path) {
+      console.log(`Logs for instance ${instanceId}:`);
+      console.log("(no logs \u2014 instance has no log file)");
+      return 0;
+    }
+    const records = readLogFile(instance.log_path);
+    console.log(`Logs for instance ${instanceId}:`);
+    printRecords(records);
+    return 0;
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    return 1;
+  } finally {
+    closeDatabase(db);
+  }
 }
 
 // src/cli/commands/install.ts
-async function commandInstall(_dataDir, _daemonPort, args, _flags) {
+init_lockfile();
+async function commandInstall(dataDir, daemonPort, args, _flags) {
   if (args.length === 0) {
     console.error("Usage: tq install <package>");
     return 2;
   }
   const packageName = args[0];
-  console.log(`Install command stub for package: ${packageName}`);
+  console.log(`Installing ${packageName}...`);
+  const proc = Bun.spawn(["bun", "add", packageName], {
+    stdout: "inherit",
+    stderr: "inherit"
+  });
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    console.error(`Failed to install ${packageName}`);
+    return 1;
+  }
+  const nodeModules = `node_modules/${packageName}`;
+  const tasksDir = `${nodeModules}/tasks`;
+  const fs = __require("fs");
+  if (!fs.existsSync(tasksDir)) {
+    console.error(`Package ${packageName} has no tasks/ directory`);
+    return 2;
+  }
+  let namespace = packageName;
+  const pkgJsonPath = `${nodeModules}/package.json`;
+  if (fs.existsSync(pkgJsonPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+      if (pkg.namespace)
+        namespace = pkg.namespace;
+    } catch {}
+  }
+  const dbConfig = resolveDataDir(dataDir);
+  try {
+    bootstrapDataDir(dbConfig);
+  } catch (err) {
+    console.error(`Error creating data directory: ${err.message}`);
+    return 1;
+  }
+  const lockfilePath = getLockfilePath(dataDir);
+  const existingLockfilePath = lockfilePath;
+  await Promise.resolve().then(() => init_lockfile());
+  const existing = readLockfile(dataDir);
+  if (namespace === "default") {
+    console.error("Error: installed packages must not use the 'default' namespace");
+    return 2;
+  }
+  for (const p of existing.packages) {
+    if (p.name === packageName) {
+      console.log(`Package ${packageName} already installed, updating...`);
+    }
+  }
+  addPackage(dataDir, packageName, "1.0.0", tasksDir, namespace);
+  console.log(`Installed ${packageName} (namespace: ${namespace})`);
+  if (daemonPort !== null) {
+    try {
+      const res = await fetch(`http://localhost:${daemonPort}/api/reload`, { method: "POST" });
+      if (res.ok) {
+        const body = await res.json();
+        console.log(`Reloaded ${body.reloaded} task(s)`);
+        if (body.warnings.length > 0) {
+          for (const w of body.warnings) {
+            console.warn(`Warning: ${w}`);
+          }
+        }
+      } else {
+        console.warn("Daemon reload failed; tasks will be picked up on next start");
+      }
+    } catch {
+      console.warn("Daemon not reachable; tasks will be picked up on next start");
+    }
+  } else {
+    console.log("No daemon running; tasks will be available when the daemon starts");
+  }
   return 0;
 }
 
 // src/cli/commands/reload.ts
-async function commandReload(_daemonPort, _flags) {
-  console.log("Reload command stub \u2014 real implementation in ticket 08/09");
-  return 0;
+async function commandReload(daemonPort, _flags) {
+  if (daemonPort === null) {
+    console.error("Error: daemon is not running. Start it with `tq daemon` first.");
+    return 1;
+  }
+  try {
+    const res = await fetch(`http://localhost:${daemonPort}/api/reload`, { method: "POST" });
+    if (res.ok) {
+      const body = await res.json();
+      console.log(`Reloaded ${body.reloaded} task(s)`);
+      if (body.warnings.length > 0) {
+        for (const w of body.warnings) {
+          console.warn(`Warning: ${w}`);
+        }
+      }
+      return 0;
+    }
+    const errBody = await res.text();
+    console.error(`Daemon returned ${res.status}: ${errBody}`);
+    return 3;
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    return 1;
+  }
 }
 
 // src/cli/index.ts
 function findDaemonDescriptor(dataDir) {
   try {
     const path = `${dataDir}/daemon.json`;
-    const raw = Bun.file(path);
-    const text = Bun.file(path).textSync();
-    if (!text)
+    const raw = __require("fs").readFileSync(path, "utf-8");
+    if (!raw)
       return null;
-    return JSON.parse(text);
+    return JSON.parse(raw);
   } catch {
     return null;
   }
 }
-function probeDaemon(port) {
+async function probeDaemon(port) {
   try {
-    const res = Bun.fetch(`http://localhost:${port}/api/health`, {
+    const res = await Bun.fetch(`http://localhost:${port}/api/health`, {
       signal: AbortSignal.timeout(2000)
     });
     return res.ok;
@@ -1129,7 +1895,7 @@ async function main(args) {
   }
   const descriptor = findDaemonDescriptor(dataDir);
   let daemonPort = descriptor?.port ?? null;
-  if (daemonPort !== null && !probeDaemon(daemonPort)) {
+  if (daemonPort !== null && !await probeDaemon(daemonPort)) {
     daemonPort = null;
   }
   switch (cmd) {

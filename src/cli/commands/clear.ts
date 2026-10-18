@@ -4,13 +4,14 @@
  * Clears finished instances and their log files.
  * clear: deletes SUCCESS instances
  * clear --all: deletes all finished instances (refuses if RUNNING)
+ * Works offline (direct SQLite) when daemon is not reachable.
  */
 
 import { controlClear } from "../../control/queue-control.ts";
-import { openDatabase, closeDatabase } from "../../db/database.ts";
+import { openDatabase, closeDatabase, resolveDataDir } from "../../db/database.ts";
 
 export async function commandClear(
-  _dataDir: string,
+  dataDir: string,
   daemonPort: number | null,
   args: string[],
   _flags: Record<string, string | true>,
@@ -23,11 +24,33 @@ export async function commandClear(
     return 2;
   }
 
-  const dataDir = process.env.TQ_DATA_DIR ?? _dataDir ?? ".tq";
+  // Try daemon API first; fall back to offline SQLite
+  if (daemonPort !== null) {
+    try {
+      const qs = all ? "?clear=all" : "?clear=success";
+      const res = await fetch(
+        `http://localhost:${daemonPort}/api/queues/${encodeURIComponent(queueId)}${qs}`,
+        { method: "POST" },
+      );
+      if (res.ok) {
+        const body = (await res.json()) as { success: boolean; deleted: number; queueId: string };
+        console.log(resultMessage(body, all));
+        if (body.deleted) console.log(`Deleted ${body.deleted} log file(s)`);
+        return 0;
+      }
+      const errBody = await res.text();
+      console.error(`Daemon returned ${res.status}: ${errBody}`);
+      // fall through to offline if API refused (e.g. RUNNING instances)
+    } catch {
+      // fall through to offline
+    }
+  }
 
+  // Offline path: direct SQLite
+  const dbConfig = resolveDataDir(dataDir);
   let db;
   try {
-    db = openDatabase(`${dataDir}/taskrunner.db`);
+    db = openDatabase(dbConfig.dbPath);
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
@@ -51,4 +74,11 @@ export async function commandClear(
   } finally {
     closeDatabase(db);
   }
+}
+
+function resultMessage(body: { success: boolean; deleted: number; queueId: string }, all: boolean): string {
+  if (all) {
+    return `Cleared ${body.deleted} finished instance(s) from ${body.queueId}`;
+  }
+  return `Cleared ${body.deleted} successful instance(s) from ${body.queueId}`;
 }
