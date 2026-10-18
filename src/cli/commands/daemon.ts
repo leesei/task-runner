@@ -4,6 +4,8 @@
  * Starts the HTTP server, writes the descriptor, and waits for shutdown.
  */
 import { resolveDataDir, openDatabase, closeDatabase, bootstrapDataDir, configureDatabase } from "../../db/database.ts";
+import { loadAllTasks } from "../../tasks/discovery.ts";
+import { getPackageLocations } from "../../tasks/lockfile.ts";
 
 export async function commandDaemon(
   dataDir: string,
@@ -61,6 +63,15 @@ export async function commandDaemon(
   console.log(`tq daemon running on http://localhost:${actualPort}`);
   console.log(`Data directory: ${dataDir}`);
   console.log("Press Ctrl+C to stop");
+
+  // Discover and load tasks
+  const cwd = process.cwd();
+  const packageLocations = getPackageLocations(dataDir);
+  const { loaded, warnings } = loadAllTasks(db, cwd, packageLocations);
+  console.log(`Loaded ${loaded} task(s)`);
+  for (const warning of warnings) {
+    console.warn(`Warning: ${warning}`);
+  }
 
   // Handle shutdown
   const descriptorPath = `${dataDir}/daemon.json`;
