@@ -1,8 +1,12 @@
 {
   "name": "task-runner",
-  "module": "index.ts",
+  "module": "src/cli/index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "build": "bun build src/cli/index.ts --outfile tq --target=bun && printf '#!/usr/bin/env bun\n' | cat - tq > tq.tmp && mv tq.tmp tq && chmod +x tq",
+    "daemon": "bun run --build ./tq daemon"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
