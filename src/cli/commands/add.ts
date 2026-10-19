@@ -7,7 +7,6 @@
 
 import { openDatabase, closeDatabase, resolveDataDir } from "../../db/database.ts";
 import { getTask, insertInstance } from "../../db/queries.ts";
-import { createLogFile } from "../../db/logs.ts";
 import { ensureQueuesForTasks } from "../../runner/queue-state.ts";
 
 function makeInput(raw: string | undefined): unknown {
