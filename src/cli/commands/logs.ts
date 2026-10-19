@@ -51,7 +51,7 @@ export async function commandLogs(
       }
       const errBody = await res.text();
       console.error(`Daemon returned ${res.status}: ${errBody}`);
-      return 3;
+      return 1;
     } catch {
       // Fall through to offline path
     }

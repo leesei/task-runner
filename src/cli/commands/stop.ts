@@ -33,7 +33,7 @@ export async function commandStop(
     }
     const errBody = await res.text();
     console.error(`Daemon returned ${res.status}: ${errBody}`);
-    return 3;
+    return 1;
   } catch (err: any) {
     console.error(`Error: ${err.message}`);
     return 1;
