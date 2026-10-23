@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-23
 - **Related:** `docs/SPECS.md` D5–D11, `GLOSSARY.md`
+- **Amended by:** ADR-0002 (completion carries the claim token)
 
 ## Context
 
@@ -21,7 +22,7 @@ The result is a shallow lifecycle: its interface is a set of row-level updates, 
 
 ### 1. One module owns instance and queue transitions
 
-`src/core/lifecycle.ts` owns both state machines. The queue and instance machines are coupled at abort (instance returns to `PENDING` *and* the queue becomes `STOPPED`) and at enqueue (an instance is created *and* an `IDLE` queue moves to `PROCESSING`), so splitting them would recreate the current spread.
+`src/core/lifecycle.ts` owns both state machines. The queue and instance machines are coupled at abort (instance returns to `PENDING` _and_ the queue becomes `STOPPED`) and at enqueue (an instance is created _and_ an `IDLE` queue moves to `PROCESSING`), so splitting them would recreate the current spread.
 
 The module is transport-independent. It does not import the CLI, the HTTP adapter, or the runner.
 
@@ -33,7 +34,7 @@ The lifecycle owns states, attempts, timestamps, queue concurrency, `log_path`, 
 - task module import, timeout enforcement, or console interception;
 - polling and consuming control requests.
 
-Those stay in `runner/runner.ts` and `runner/execution.ts`. `abortQueue` returns the instance ids the runner must signal; the runner fires the controllers.
+Those stay in `runner/runner.ts` and `runner/execution.ts`. `abortQueue` returns the claim tokens the runner must signal; the runner fires the controllers.
 
 ### 3. Intent-level interface
 
@@ -41,7 +42,7 @@ Those stay in `runner/runner.ts` and `runner/execution.ts`. `abortQueue` returns
 createLifecycle({ db, events, logDir }): Lifecycle
 
 enqueue(taskId, input): { id, createdAt }
-claimRunnable(queueId): Claim[]
+claimQueue(queueId): Claim[]
 finishRun(instanceId, outcome): { applied, state?, queueState? }
 abortQueue(queueId): { instanceIds, queueState }
 start(queueId): QueueState
@@ -50,11 +51,16 @@ syncQueues(): { created, updated }
 recoverOnBoot(): { reset, started, stayedStopped }
 ```
 
-A `Claim` is `{ instanceId, taskId, entryPoint, timeoutMs, input, logPath }`. `claimRunnable` enforces FIFO order and the queue concurrency limit inside one transaction and moves the claimed instances to `RUNNING`. Callers never perform a read-then-write to decide what may run.
+> ADR-0002 amends this interface: a claim carries `{ instanceId, attempt }`,
+> `finishRun` takes that token, and `abortQueue` returns the attempts that were
+> running before it incremented them. The lifecycle also exposes `claim()` as a
+> batched form of `claimQueue`.
+
+A `Claim` is `{ instanceId, attempt, taskId, entryPoint, timeoutMs, input, logPath }`. `claimQueue` enforces FIFO order and the queue concurrency limit inside one transaction and moves the claimed instances to `RUNNING`. Callers never perform a read-then-write to decide what may run.
 
 `finishRun` auto-drains a `PROCESSING` queue to `IDLE` when the last running instance finishes, in the same transaction. Late completion after an abort or timeout returns `{ applied: false }`; it is expected under cooperative cancellation and is not an error.
 
-`abortQueue` recomputes the currently `RUNNING` instances rather than trusting ids captured when a control request was written. It returns them to `PENDING`, increments their attempts, stops the queue, and returns the ids the runner must signal.
+`abortQueue` recomputes the currently `RUNNING` instances rather than trusting tokens captured when a control request was written. It returns them to `PENDING`, increments their attempts, stops the queue, and returns the claim tokens the runner must signal.
 
 `syncQueues` ensures one queue per task and updates concurrency for existing queues. Deleting queues for removed tasks is deliberately deferred; it needs a decision about retaining historical instances.
 

@@ -267,15 +267,17 @@ Task instance:
 ```
 PENDING → RUNNING → SUCCESS
 PENDING → RUNNING → FAILED          (non-zero exit, throw, or timeout)
-RUNNING → abort → PENDING           (partial log preserved; queue becomes STOPPED)
+RUNNING → abort → PENDING           (partial log preserved; attempt incremented; queue becomes STOPPED)
 ```
 
 Queue:
 
 ```
 IDLE ⇄ PROCESSING
+IDLE → STOPPED                      (stop on an empty queue)
 PROCESSING → STOPPED                (stop, or abort)
-STOPPED → PROCESSING                (start)
+STOPPED → PROCESSING                (start with work)
+STOPPED → IDLE                      (start with no work)
 PROCESSING → IDLE                   (drained: nothing running, nothing pending)
 ```
 
@@ -287,9 +289,13 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
 ### D7 — Queue control semantics
 
 - `stop`: stop launching new instances; let RUNNING instances finish; queue ends STOPPED.
-- `start`: queue enters PROCESSING and drains PENDING instances in enqueue order.
+- `start`: if there is pending or running work, the queue enters PROCESSING and drains PENDING
+  instances in enqueue order; if there is nothing to do, it is IDLE.
 - `abort`: signal the current RUNNING instance(s), return them to PENDING with their partial
-  logs, and leave the queue STOPPED. Abort does not start any pending work.
+  logs and attempt incremented, and leave the queue STOPPED. Abort does not start any pending
+  work.
+- `start`, `stop`, and `abort` are idempotent intent operations. Repeating a command in its
+  target state is a no-op, not an error.
 - Drain order is FIFO by instance id within a queue.
 - A task definition always has exactly one queue, and the queue id equals the task id.
 
@@ -304,8 +310,8 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
   code, failure reason, timestamps, and log location. Instance ids are monotonically increasing
   integers per project database and are the handle used by the CLI, the API, and the dashboard.
 - Control requests are durable rows with a kind (`abort` or `reload`), the targeted queue and
-  instance ids, a creation time, and a consumed time. They are the only cross-process command
-  channel; the daemon consumes them on its runner poll tick (D10).
+  claim tokens (instance id and attempt), a creation time, and a consumed time. They are the
+  only cross-process command channel; the daemon consumes them on its runner poll tick (D10).
 - Logs are one append-only JSONL file per instance, with records carrying a timestamp, stream
   (`stdout`/`stderr`), and text. This preserves interleaving, supports streaming a running
   instance, and keeps large output out of SQLite. A retry appends to the same file; it is not
@@ -358,11 +364,14 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
   control requests in SQLite:
   - `start` and `stop` write the queue's target state directly. The runner reads queue state on
     every tick, so no request row is needed.
-  - `abort` writes an abort request with the targeted queue and its RUNNING instance ids. On
-    its next tick the daemon signals those instances' `AbortController`s, returns them to
-    PENDING with partial logs preserved, and leaves the queue STOPPED. The core operation waits
-    a bounded time for the request to be consumed so the caller can report the result; timeout
-    is a runtime failure.
+  - `abort` writes an abort request with the targeted queue and the claim tokens (instance id
+    and attempt) that were RUNNING when it was written. On its next tick the daemon recomputes
+    the queue's RUNNING instances, returns them to PENDING with partial logs preserved and
+    attempts incremented, and leaves the queue STOPPED. If none of the recorded tokens is still
+    RUNNING, the request is stale and is discarded without changing state. The runner then
+    signals the returned tokens' `AbortController`s. The core operation waits a bounded time
+    for the request to be consumed so the caller can report the result; timeout is a runtime
+    failure.
   - `reload` performs discovery and database updates through core, then writes a reload request
     and waits (bounded) for it to be consumed, so module re-import and queue refresh have
     applied before the command returns. A timeout is a runtime failure.
@@ -412,7 +421,8 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
 - Core mutations do not know about SSE. The task lifecycle publishes state-change events through
   an injected event sink after its transaction commits; the daemon adapter subscribes to the bus
   and translates events into the queue and instance event streams. Core and runner code must not
-  import the HTTP adapter.
+  import the HTTP adapter. Events are one change per publish, not batches; instance events
+  precede queue events from the same transaction.
 - REST endpoints (`Bun.serve` serves both the JSON API and the dashboard assets):
 
 | Endpoint                             | Purpose                                                                     |
