@@ -156,6 +156,15 @@ function resolveTaskDir(
   };
 }
 
+function looksLikeTaskDir(dir: string): boolean {
+  return (
+    existsSync(join(dir, "settings.json")) ||
+    existsSync(join(dir, "index.ts")) ||
+    existsSync(join(dir, "README.md")) ||
+    existsSync(join(dir, "schema.json"))
+  );
+}
+
 function scanTasksDir(
   tasksDir: string,
   source: string,
@@ -169,11 +178,11 @@ function scanTasksDir(
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const resolved = resolveTaskDir(
-      join(tasksDir, entry.name),
-      source,
-      namespaceOverride,
-    );
+    const taskDir = join(tasksDir, entry.name);
+    // Shared module directories (e.g. a package-level `lib/`) are not task
+    // candidates; only warn when a folder actually looks like a task folder.
+    if (!looksLikeTaskDir(taskDir)) continue;
+    const resolved = resolveTaskDir(taskDir, source, namespaceOverride);
     warnings.push(...resolved.warnings);
     if (resolved.task) tasks.push(resolved.task);
   }

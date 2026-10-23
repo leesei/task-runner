@@ -49,6 +49,17 @@ describe("Seam A: discovery namespacing and precedence", () => {
     }
   });
 
+  test("shared module folders are not reported as malformed tasks", () => {
+    const project = temp();
+    writeTask(join(project, "tasks"), "real", { id: "real", name: "Real" });
+    mkdirSync(join(project, "tasks", "lib"), { recursive: true });
+    writeFileSync(join(project, "tasks", "lib", "helpers.ts"), "export {};\n");
+
+    const { tasks, warnings } = discoverAllTasks(project, db, []);
+    expect(tasks.map((t) => t.id)).toEqual(["default:real"]);
+    expect(warnings).toEqual([]);
+  });
+
   test("ids are namespace:id, defaulting to the default namespace", () => {
     const project = temp();
     writeTask(join(project, "tasks"), "plain", { id: "plain", name: "Plain" });
