@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
-    "filepath": { "type": "string", "description": "Directory path to list" }
+    "filepath": { "type": "string", "description": "Directory path to list", "format": "path" }
   },
   "required": ["filepath"]
 }

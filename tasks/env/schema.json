@@ -3,7 +3,7 @@
   "type": "object",
   "properties": {
     "filter": { "type": "string", "description": "Only show env vars whose name starts with this prefix" },
-    "values": { "type": "boolean", "description": "Show values (default: names only when any sensitive var is present)", "default": true }
+    "values": { "type": "boolean", "description": "Show values (default: true; sensitive values are always redacted)", "default": true }
   },
   "required": []
 }

@@ -4,6 +4,7 @@
   "name": "Media info",
   "description": "Print media information for a video/audio file",
   "concurrency": 1,
+  "timeoutMs": 1800000,
   "inputSchema": "schema.json",
   "env": {},
   "category": "media",

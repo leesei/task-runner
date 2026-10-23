@@ -4,11 +4,15 @@
   "name": "Environment variables",
   "description": "Dump environment variables, with sensitive values redacted",
   "concurrency": 8,
+  "timeoutMs": 1800000,
   "inputSchema": "schema.json",
   "env": {},
   "category": "text",
   "agents": {
     "daemon": { "logPath": "../logs" },
-    "cli": { "argumentHint": "[filter]", "example": "tq add default:env", "example": "tq add default:env '{\"filter\":\"TASKRUNNER\"}'" }
+    "cli": {
+      "argumentHint": "[filter]",
+      "example": "tq add default:env '{\"filter\":\"TASKRUNNER\"}'"
+    }
   }
 }

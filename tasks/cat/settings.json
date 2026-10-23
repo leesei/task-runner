@@ -4,6 +4,7 @@
   "name": "Print file",
   "description": "Print a file's contents, with sensitive values redacted",
   "concurrency": 4,
+  "timeoutMs": 1800000,
   "inputSchema": "schema.json",
   "env": {},
   "category": "fs",

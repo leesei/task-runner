@@ -1,7 +1,7 @@
 import { $ } from "bun";
 
 export async function ls(filepath: string) {
-  const { stdout, stderr, exitCode } = await $`ls \"${filepath}\"`
+  const { stdout, stderr, exitCode } = await $`ls ${filepath}`
     .nothrow()
     .quiet();
   if (stdout) console.log(stdout.toString());
