@@ -5,6 +5,7 @@
     "": {
       "name": "task-runner",
       "dependencies": {
+        "ajv": "^8.20.0",
         "table": "^6.9.0",
       },
       "devDependencies": {
