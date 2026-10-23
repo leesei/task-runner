@@ -29,7 +29,7 @@ const SENSITIVE_VALUE_PREFIXES = [
   "xoxb-", "xoxp-", "xoxa-", "xoxr-",       // Slack
   "sk_live_", "sk_test_",                     // Stripe
   "AKIA",                                      // AWS access key id
-  "-----BEGIN",                                // private key headers
+  "-----BEGIN", "-----END",                    // private key headers/footers
   "ya29.",                                     // Google service account
   "Bot ",                                      // Discord bot tokens
 ];
@@ -57,47 +57,61 @@ function isSensitiveValue(value: string): boolean {
   return false;
 }
 
-function redact(value: string): string {
-  return "[REDACTED]";
-}
+// Label-aware: "password=VALUE" -> "password=[REDACTED]".
+// The global flag is required by replace(); using it with String.match() was
+// the bug that made this branch dead code.
+const LABELED_SECRET_RE =
+  /([A-Za-z_][A-Za-z0-9_.-]*)\s*([=:])\s*(['"]?)([^\s'"]{8,})\3/g;
+const AUTH_SCHEME_RE = /\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})/gi;
+const JWT_RE = /\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
+const BASE64_BLOB_RE = /\b[A-Za-z0-9+/]{40,}={0,2}\b/g;
 
 function redactLine(line: string): { redacted: boolean; text: string } {
-  // Label-aware: "password=VALUE" -> "password=[REDACTED]"
-  const labeled = /(password|passwd|pwd|secret|secret_key|secret_access_key|api_key|apikey|api_key_id|access_key|access_token|refresh_token|token|auth_token|private_key|private_key_pem|ssh_key|ssh_private_key|jwt_secret|jwt_signing_key|client_secret|client_password|credentials|mongodb_uri|mongodb_connection_string|database_url|db_password|redis_password|redispassword|smtp_password|mail_password|stripe_secret_key|stripe_key|slack_bot_token|slack_token|github_token|gh_token|pat|personal_access_token|db_pass|redis_pass|bearer|basic)\s*[=:]\s*(['"]?)([^\s'"]{8,})\2/gi;
-  const m = line.match(labeled);
-  if (m && m[3]) {
-    const value = m[3]!;
-    if (isSensitiveValue(value) || isSensitiveName(m[1]!)) {
-      const matchIndex = m.index;
-      if (matchIndex === undefined) {
-        return { redacted: false, text: line };
+  let changed = false;
+
+  let text = line.replace(
+    LABELED_SECRET_RE,
+    (match, label: string, separator: string, quote: string, value: string) => {
+      if (isSensitiveName(label) || isSensitiveValue(value)) {
+        changed = true;
+        return `${label}${separator}${quote}[REDACTED]${quote}`;
       }
-      const before = line.slice(0, matchIndex);
-      const matched = m[0]!;
-      const after = line.slice(matchIndex + matched.length);
-      const eqIndex = matched.indexOf("=");
-      const colonIndex = matched.indexOf(":");
-      let sep: string;
-      let labelPart: string;
-      if (eqIndex >= 0) {
-        sep = "=";
-        labelPart = matched.slice(0, eqIndex);
-      } else if (colonIndex >= 0) {
-        sep = ":";
-        labelPart = matched.slice(0, colonIndex);
-      } else {
-        sep = "=";
-        labelPart = matched;
+      return match;
+    },
+  );
+
+  text = text.replace(
+    AUTH_SCHEME_RE,
+    (match, scheme: string, value: string) => {
+      if (isSensitiveValue(value)) {
+        changed = true;
+        return `${scheme} [REDACTED]`;
       }
-      const text = before + labelPart + sep + "[REDACTED]" + after;
-      return { redacted: true, text };
+      return match;
+    },
+  );
+
+  text = text.replace(JWT_RE, (match) => {
+    if (isSensitiveValue(match)) {
+      changed = true;
+      return "[REDACTED]";
     }
-  }
-  // Value-only: a long sensitive-looking token on its own line
-  if (isSensitiveValue(line.trim())) {
+    return match;
+  });
+
+  text = text.replace(BASE64_BLOB_RE, (match) => {
+    if (isSensitiveValue(match)) {
+      changed = true;
+      return "[REDACTED]";
+    }
+    return match;
+  });
+
+  // Value-only: a long sensitive-looking token on its own line.
+  if (!changed && isSensitiveValue(text.trim())) {
     return { redacted: true, text: "[REDACTED]" };
   }
-  return { redacted: false, text: line };
+  return { redacted: changed, text };
 }
 
 

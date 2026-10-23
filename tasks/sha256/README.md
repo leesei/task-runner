@@ -19,6 +19,7 @@ tq add default:sha256 '{"filepath":"fixture/1/1.srt"}'
 
 - Concurrency: 2 (IO-bound on large files)
 - Category: fs
+- Timeout: 30 minutes (`timeoutMs: 1800000`)
 
 ## Entrypoint
 

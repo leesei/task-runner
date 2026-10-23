@@ -2,7 +2,7 @@
 
 Prints a file's contents to stdout, with sensitive values redacted.
 
-Redaction is a best-effort scan: values that look like secrets (API keys, tokens, passwords, private keys, AWS credentials, JWTs) are replaced with `[REDACTED]` in the output. This is intended to make log inspection on the dashboard safer, not to guarantee no secret ever leaks.
+Redaction is a best-effort scan: values that look like secrets (API keys, tokens, passwords, private keys, AWS credentials, JWTs) are replaced with `[REDACTED]` in the output. Labeled assignments (`password=...`, `api_key: ...`), `Bearer`/`Basic` credentials, private-key blocks, and long base64/JWT-shaped tokens are covered. This is intended to make log inspection on the dashboard safer, not to guarantee no secret ever leaks.
 
 ## Usage
 
@@ -27,3 +27,4 @@ tq add default:cat '{"filepath":"fixture/1/1.srt","limit":20}'
 
 - Concurrency: 4
 - Category: fs
+- Timeout: 30 minutes (`timeoutMs: 1800000`)

@@ -18,6 +18,8 @@ tq add default:ls '{"filepath":"fixture/1"}'
 ## Settings
 
 - Concurrency: 4
+- Category: fs
+- Timeout: 30 minutes (`timeoutMs: 1800000`)
 
 ## Entrypoint
 
