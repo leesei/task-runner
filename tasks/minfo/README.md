@@ -11,9 +11,9 @@ tq add default:minfo '{"filepath":"fixture/1/1.srt"}'
 
 ## Input
 
-| Field    | Type   | Required | Description            |
-|----------|--------|----------|------------------------|
-| filepath | string | yes      | Path to the media file |
+| Field    | Type   | Required | Description                                          |
+| -------- | ------ | -------- | ---------------------------------------------------- |
+| filepath | string | yes      | Path to the media file (absolute or relative to cwd) |
 
 ## Settings
 

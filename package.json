@@ -4,13 +4,17 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "bun build src/cli/index.ts --outfile tq --target=bun && printf '#!/usr/bin/env bun\n' | cat - tq > tq.tmp && mv tq.tmp tq && chmod +x tq",
-    "daemon": "bun run --build ./tq daemon"
+    "build": "bun build src/cli/index.ts --outfile ./bin/tq --target=bun && printf '#!/usr/bin/env bun\n' | cat - ./bin/tq > ./bin/tq.tmp && mv ./bin/tq.tmp ./bin/tq && chmod +x ./bin/tq",
+    "daemon": "bun run --build ./bin/tq daemon",
+    "tq": " bun run src/cli/index.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^7"
+  },
+  "dependencies": {
+    "table": "^6.9.0"
   }
 }

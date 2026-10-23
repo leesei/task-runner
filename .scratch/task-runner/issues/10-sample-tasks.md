@@ -16,3 +16,4 @@
 - [ ] `cat` and `env` redact sensitive-looking values in their output
 - [ ] Task settings declare correct namespace, id, name, description, concurrency, category, timeout
 - [ ] Schemas declare the correct input shape for each task
+- [ ] File-operating tasks mark path string properties with `"format": "path"` so the CLI resolves relative paths

@@ -73,3 +73,25 @@ Round 1
 Round 2
 
 your understanding is correct, please proceed
+
+---
+
+Add to the CLI spec:
+
+context is a JSON whose schema is defined by the task
+the add command/HTTP API should fail if the if the input does not match the schema
+cli can specify the context with escaped JSON string, @file to ingest JSON file, var=value for string, var:=value for non string (refer to xh/httpie)
+cli should add a "-v" option for verbosity
+for cli, filepaths for task is relative to the invocation folder or absolute, the cli should resolve relative path to absolute path
+for `tq add` it dumps the time, task and context
+
+update spec and issues
+
+---
+
+implement
+
+cli no calling HTTP
+cli use xh/httpie style to specify context
+-v option
+relative and absolution filepaths in context

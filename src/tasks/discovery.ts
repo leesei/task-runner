@@ -3,18 +3,18 @@
  *
  * Walks the search path in order:
  * 1. Project task folder (tasks/ in cwd)
- * 2. User task folder (~/.tq/tasks/)
+ * 2. User task folder (~/.task-runner/tasks/)
  * 3. Installed package locations (from lockfile)
  *
  * First match wins. Conflicts are reported as warnings.
  */
 
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
+import { DEFAULT_DATA_DIR_NAME } from "../defaults.ts";
 import type { DB } from "../db/database.ts";
-import { insertTask, ensureQueue, getTask } from "../db/queries.ts";
-import type { TaskRow } from "../db/schema.ts";
+import { ensureQueue, getTask, insertTask } from "../db/queries.ts";
 
 export interface TaskManifest {
   namespace?: string;
@@ -32,8 +32,8 @@ export interface TaskManifest {
 export interface DiscoveredTask {
   id: string;
   manifest: TaskManifest;
-  entryPoint: string;  // absolute path to index.ts
-  schemaPath: string | null;  // absolute path to schema file, or null
+  entryPoint: string; // absolute path to index.ts
+  schemaPath: string | null; // absolute path to schema file, or null
   warnings: string[];
 }
 
@@ -105,7 +105,7 @@ export function discoverProjectTasks(projectRoot: string): DiscoveredTask[] {
 }
 
 export function discoverUserTasks(): DiscoveredTask[] {
-  const userTasksDir = join(homedir(), ".tq", "tasks");
+  const userTasksDir = join(homedir(), DEFAULT_DATA_DIR_NAME, "tasks");
   if (!existsSync(userTasksDir)) return [];
 
   const entries = readdirSync(userTasksDir, { withFileTypes: true });
@@ -129,7 +129,9 @@ export interface PackageLocation {
   namespace: string;
 }
 
-export function discoverPackageTasks(locations: PackageLocation[]): DiscoveredTask[] {
+export function discoverPackageTasks(
+  locations: PackageLocation[],
+): DiscoveredTask[] {
   const tasks: DiscoveredTask[] = [];
 
   for (const loc of locations) {
@@ -240,7 +242,8 @@ export function loadTaskIntoDatabase(db: DB, task: DiscoveredTask): boolean {
     timeout_ms: task.manifest.timeoutMs ?? 1800000,
     input_schema: inputSchema,
     manifest_hash: JSON.stringify(task.manifest),
-    manifest_warnings: task.warnings.length > 0 ? JSON.stringify(task.warnings) : null,
+    manifest_warnings:
+      task.warnings.length > 0 ? JSON.stringify(task.warnings) : null,
     entry_point: task.entryPoint,
   });
 
@@ -267,7 +270,7 @@ export function loadAllTasks(
   const allWarnings = [...result.warnings];
   for (const task of result.tasks) {
     if (task.warnings.length > 0) {
-      const existing = allWarnings.find(w => w.includes(task.id));
+      const existing = allWarnings.find((w) => w.includes(task.id));
       if (!existing) {
         allWarnings.push(...task.warnings);
       }

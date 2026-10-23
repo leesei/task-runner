@@ -1,27 +1,31 @@
 /**
  * `tq add <task> [input]` command.
  *
- * Validates input, enqueues an instance, prints its id.
- * Works offline (direct SQLite) when daemon is not reachable.
+ * Calls the shared core in-process. It never uses the daemon HTTP API, so it
+ * works with the daemon stopped; the runner picks the instance up on its next
+ * poll tick.
  */
 
-import { openDatabase, closeDatabase, resolveDataDir } from "../../db/database.ts";
-import { getTask, insertInstance } from "../../db/queries.ts";
-import { ensureQueuesForTasks } from "../../runner/queue-state.ts";
+import {
+  bootstrapDataDir,
+  closeDatabase,
+  configureDatabase,
+  openDatabase,
+  resolveDataDir,
+} from "../../db/database.ts";
+import { CoreError, enqueueTask } from "../../core/service.ts";
 
 function makeInput(raw: string | undefined): unknown {
   if (!raw) return {};
   try {
     return JSON.parse(raw);
   } catch {
-    // Treat as plain string input
     return raw;
   }
 }
 
 export async function commandAdd(
   dataDir: string,
-  daemonPort: number | null,
   args: string[],
   _flags: Record<string, string | true>,
 ): Promise<number> {
@@ -32,59 +36,29 @@ export async function commandAdd(
 
   const taskId = args[0]!;
   const input = makeInput(args[1]);
-
   const inputJson = JSON.stringify(input);
 
-  // If daemon is reachable, enqueue through HTTP API
-  if (daemonPort !== null) {
-    try {
-      const res = await fetch(
-        `http://localhost:${daemonPort}/api/instances`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ task: taskId, input }),
-        },
-      );
-      if (res.ok) {
-        const body = (await res.json()) as { id: number; task: string; input: unknown };
-        console.log(`Enqueued instance ${body.id} on task ${body.task}`);
-        console.log(`Input: ${inputJson}`);
-        return 0;
-      }
-      // Non-200: fall through to offline path below
-      const errBody = await res.text();
-      console.error(`Daemon returned ${res.status}: ${errBody}`);
-    } catch {
-      // Daemon not reachable — fall through to offline path
-    }
-  }
-
-  // Offline path: direct SQLite insert
   const dbConfig = resolveDataDir(dataDir);
   let db;
   try {
+    bootstrapDataDir(dbConfig);
     db = openDatabase(dbConfig.dbPath);
+    configureDatabase(db);
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
   try {
-    const task = getTask(db, taskId)!;
-    if (!task) {
+    const id = enqueueTask(db, taskId, input);
+    console.log(`Enqueued instance ${id} on task ${taskId}`);
+    console.log(`Input: ${inputJson}`);
+    return 0;
+  } catch (err: any) {
+    if (err instanceof CoreError && err.code === "TASK_NOT_FOUND") {
       console.error(`Task not found: ${taskId}`);
       return 2;
     }
-
-    ensureQueuesForTasks(db);
-
-    const id = insertInstance(db, taskId, inputJson, null);
-    console.log(`Enqueued instance ${id} on task ${taskId}`);
-    console.log(`Input: ${inputJson}`);
-    console.log("Note: instance will be picked up when daemon processes the queue");
-    return 0;
-  } catch (err: any) {
     console.error(`Error: ${err.message}`);
     return 1;
   } finally {

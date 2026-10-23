@@ -103,6 +103,27 @@ export function uninstallConsoleInterception(): void {
 }
 
 // ─── Task Execution ────────────────────────────────────────────────────────────
+
+/**
+ * Complete an instance only if it is still RUNNING. An aborted or timed-out
+ * instance may have been moved to PENDING/FAILED already; late writes from the
+ * superseded attempt must not overwrite that state.
+ */
+function finishInstance(
+  db: DB,
+  instanceId: number,
+  state: InstanceState,
+  exitCode?: number,
+  failureReason?: string,
+): boolean {
+  const instance = getInstance(db, instanceId);
+  if (!instance || instance.state !== "RUNNING") return false;
+
+  updateInstanceState(db, instanceId, state, exitCode, failureReason);
+  emitInstanceStateChanged(instanceId, state);
+  return true;
+}
+
 export interface TaskDefinition {
   id: string;
   entryPoint: string;  // Resolved path to index.ts
@@ -140,11 +161,9 @@ export async function executeTask(
       completed = true;
 
       if (exitCode === 0) {
-        updateInstanceState(db, instanceId, "SUCCESS");
-        emitInstanceStateChanged(instanceId, "SUCCESS");
+        finishInstance(db, instanceId, "SUCCESS");
       } else {
-        updateInstanceState(db, instanceId, "FAILED", exitCode);
-        emitInstanceStateChanged(instanceId, "FAILED");
+        finishInstance(db, instanceId, "FAILED", exitCode);
       }
     },
   };
@@ -156,7 +175,7 @@ export async function executeTask(
       timedOut = true;
       completed = true;
       // Timeout: mark FAILED with reason 'timeout', do NOT return to PENDING
-      updateInstanceState(db, instanceId, "FAILED", undefined, "timeout");
+      finishInstance(db, instanceId, "FAILED", undefined, "timeout");
       abort();
     }, task.timeoutMs);
 
@@ -181,8 +200,7 @@ export async function executeTask(
       if (!taskFn || typeof taskFn !== "function") {
         console.error(`Task ${task.id}: no default export found`);
         if (!completed) {
-          updateInstanceState(db, instanceId, "FAILED", 1, "no_default_export");
-          emitInstanceStateChanged(instanceId, "FAILED");
+          finishInstance(db, instanceId, "FAILED", 1, "no_default_export");
         }
         return;
       }
@@ -193,15 +211,13 @@ export async function executeTask(
 
         // If task returns without calling done, treat as success
         if (!completed) {
-          updateInstanceState(db, instanceId, "SUCCESS");
-          emitInstanceStateChanged(instanceId, "SUCCESS");
+          finishInstance(db, instanceId, "SUCCESS");
         }
       } catch (err: any) {
         if (!completed) {
           const message = err?.message ?? String(err);
           console.error(`Task ${task.id}: ${message}`);
-          updateInstanceState(db, instanceId, "FAILED", 1, message);
-          emitInstanceStateChanged(instanceId, "FAILED");
+          finishInstance(db, instanceId, "FAILED", 1, message);
         }
       }
     },

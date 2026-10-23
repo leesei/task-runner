@@ -17,31 +17,86 @@
  */
 
 import type { DB } from "../db/database.ts";
+import { resolveDataDir } from "../db/database.ts";
+import { DEFAULT_DATA_DIR_NAME } from "../defaults.ts";
 import {
-  checkDrained,
-} from "./queue-state.ts";
-import {
+  getInstance,
+  getPendingControlRequests,
   getPendingInstances,
+  getQueue,
   getRunningInstances,
   getTask,
+  incrementAttempt,
+  markControlRequestConsumed,
   updateInstanceState,
+  updateQueueState,
 } from "../db/queries.ts";
 import { executeTask } from "./execution.ts";
-import { resolveDataDir } from "../db/database.ts";
+import { checkDrained } from "./queue-state.ts";
 
 export interface RunnerConfig {
   pollIntervalMs: number;
   dataDir: string;
+  onReload?: () => void | Promise<void>;
 }
 
 const DEFAULT_CONFIG: RunnerConfig = {
   pollIntervalMs: 1000,
-  dataDir: ".tq",
+  dataDir: DEFAULT_DATA_DIR_NAME,
 };
 
 export function createRunner(config: Partial<RunnerConfig> = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
   const dbConfig = resolveDataDir(cfg.dataDir);
+  const controllers = new Map<number, AbortController>();
+
+  async function processControlRequests(db: DB): Promise<void> {
+    const requests = getPendingControlRequests(db);
+
+    for (const request of requests) {
+      if (request.kind === "abort") {
+        let instanceIds: number[] = [];
+        try {
+          const parsed = JSON.parse(request.instance_ids ?? "[]") as unknown;
+          if (Array.isArray(parsed)) {
+            instanceIds = parsed.filter((id): id is number => typeof id === "number");
+          }
+        } catch {
+          instanceIds = [];
+        }
+
+        for (const instanceId of instanceIds) {
+          // Move the instance out of RUNNING before firing the signal: a task
+          // may call done() synchronously from its abort handler, and that
+          // late completion must not win over the abort.
+          const instance = getInstance(db, instanceId);
+          if (instance?.state === "RUNNING") {
+            incrementAttempt(db, instanceId);
+            updateInstanceState(db, instanceId, "PENDING");
+          }
+
+          const controller = controllers.get(instanceId);
+          controller?.abort();
+          controllers.delete(instanceId);
+        }
+
+        if (request.queue_id) {
+          const queue = getQueue(db, request.queue_id);
+          if (queue && queue.state !== "STOPPED") {
+            updateQueueState(db, request.queue_id, "STOPPED");
+          }
+        }
+      } else if (request.kind === "reload") {
+        try {
+          await cfg.onReload?.();
+        } catch (err) {
+          console.error("Reload request failed:", err);
+        }
+      }
+
+      markControlRequestConsumed(db, request.id);
+    }
+  }
 
   return {
     /**
@@ -49,12 +104,17 @@ export function createRunner(config: Partial<RunnerConfig> = {}) {
      * Returns the number of instances launched.
      */
     async runOnce(db: DB): Promise<number> {
+      await processControlRequests(db);
+
       let launched = 0;
 
       // Get all PROCESSING queues
-      const queues = db.query<{ id: string; concurrency: number }, []>(
-        "SELECT id, concurrency FROM queues WHERE state = 'PROCESSING' ORDER BY id",
-      ).all();
+      const queues = db
+        .query<
+          { id: string; concurrency: number },
+          []
+        >("SELECT id, concurrency FROM queues WHERE state = 'PROCESSING' ORDER BY id")
+        .all();
 
       for (const queue of queues) {
         // Check concurrency
@@ -88,6 +148,7 @@ export function createRunner(config: Partial<RunnerConfig> = {}) {
 
           // Create an AbortController for this instance
           const controller = new AbortController();
+          controllers.set(instance.id, controller);
 
           // Execute the task with timeout and abort handling
           // entrypoint is stored in the tasks table by discovery
@@ -104,9 +165,16 @@ export function createRunner(config: Partial<RunnerConfig> = {}) {
             controller.signal,
             dbConfig.logDir,
             () => controller.abort(),
-          ).catch(err => {
-            console.error(`Task execution error for instance ${instance.id}:`, err);
-          });
+          )
+            .catch((err) => {
+              console.error(
+                `Task execution error for instance ${instance.id}:`,
+                err,
+              );
+            })
+            .finally(() => {
+              controllers.delete(instance.id);
+            });
 
           launched++;
         }

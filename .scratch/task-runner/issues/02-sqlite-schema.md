@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** resolved
+**Status:** done
 
 - [ ] Database schema has tables: `tasks` (id, namespace, name, description, category, concurrency, timeout_ms, input_schema, manifest_hash), `queues` (id, state, concurrency, created_at), `instances` (id, task_id, input, state, attempt, exit_code, failure_reason, created_at, started_at, ended_at, log_path)
 - [ ] Instance ids are monotonically increasing integers (auto-increment or explicit sequence)

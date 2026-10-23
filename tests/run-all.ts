@@ -44,21 +44,21 @@ async function main() {
 
   // cat
   await run("cat(normal file)", (ctx) =>
-    catRunWith({ ...ctx, input: { filepath: "tasks/test-cases/cat/normal-input.txt" } }),
+    catRunWith({ ...ctx, input: { filepath: "tests/cat/normal-input.txt" } }),
   );
   await run("cat(sensitive file)", (ctx) =>
-    catRunWith({ ...ctx, input: { filepath: "tasks/test-cases/cat/sensitive-input.txt" } }),
+    catRunWith({ ...ctx, input: { filepath: "tests/cat/sensitive-input.txt" } }),
   );
   await run("cat(missing file)", (ctx) =>
     catRunWith({ ...ctx, input: { filepath: "/tmp/does-not-exist-xyz" } }),
   );
   await run("cat(limit 2)", (ctx) =>
-    catRunWith({ ...ctx, input: { filepath: "tasks/test-cases/cat/normal-input.txt", limit: 2 } }),
+    catRunWith({ ...ctx, input: { filepath: "tests/cat/normal-input.txt", limit: 2 } }),
   );
 
   // sha256
   await run("sha256(hello.txt)", (ctx) =>
-    shaRunWith({ ...ctx, input: { filepath: "tasks/test-cases/sha256/hello.txt" } }),
+    shaRunWith({ ...ctx, input: { filepath: "tests/sha256/hello.txt" } }),
   );
   await run("sha256(missing file)", (ctx) =>
     shaRunWith({ ...ctx, input: { filepath: "/tmp/does-not-exist-xyz" } }),

@@ -6,8 +6,12 @@
   "concurrency": 1,
   "inputSchema": "schema.json",
   "env": {},
+  "category": "media",
   "agents": {
     "daemon": { "logPath": "../logs" },
-    "cli": { "argumentHint": "<filepath>", "example": "tq add default:minfo fixture/1" }
+    "cli": {
+      "argumentHint": "<filepath>",
+      "example": "tq add default:minfo fixture/1"
+    }
   }
 }

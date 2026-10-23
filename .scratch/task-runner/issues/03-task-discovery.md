@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** resolved
+**Status:** done
 
 - [ ] Search path order: project `tasks/` > user task folder > installed-package locations (lockfile order)
 - [ ] Each task folder is read: `index.ts` entrypoint, `settings.json`, optional `inputSchema` file
@@ -13,5 +13,5 @@
 - [ ] Malformed manifest, missing entrypoint, unreadable schema: skipped with warning, not fatal
 - [ ] Warnings are collected and surfaced via `status` and `reload` output
 - [ ] Entrypoint is imported by resolved file path so normal module resolution applies for shared modules
-- [ ] User task folder location: under the user's home in a `tq` directory (e.g. `~/.tq/tasks/`)
-- [ ] The lockfile (`.tq/packages.lock` or similar) lists installed packages and their task locations
+- [ ] User task folder location: under the user's home in a `tq` directory (e.g. `~/.task-runner/tasks/`)
+- [ ] The lockfile (`.task-runner/packages.lock` or similar) lists installed packages and their task locations
