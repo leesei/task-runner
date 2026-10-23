@@ -2,16 +2,18 @@
  * Task discovery from search path.
  *
  * Walks the search path in order:
- * 1. Project task folder (tasks/ in cwd)
- * 2. User task folder (~/.task-runner/tasks/)
- * 3. Installed package locations (from lockfile)
+ * 1. Project task folder (`tasks/` in the project root)
+ * 2. User task folder (`~/.task-runner/tasks/`)
+ * 3. Installed package locations (from the lockfile)
  *
- * First match wins. Conflicts are reported as warnings.
+ * First match wins. Shadows and load failures are reported as warnings rather
+ * than silently skipped, so `status`/`reload` can explain why a task did not
+ * register.
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { DEFAULT_DATA_DIR_NAME } from "../defaults.ts";
 import type { DB } from "../db/database.ts";
 import { ensureQueue, getTask, insertTask } from "../db/queries.ts";
@@ -42,51 +44,124 @@ export interface DiscoveryResult {
   warnings: string[];
 }
 
+interface ResolvedTaskDir {
+  task: DiscoveredTask | null;
+  warnings: string[];
+}
+
 function parseManifest(path: string): TaskManifest | null {
   try {
     const raw = readFileSync(path, "utf-8");
     return JSON.parse(raw) as TaskManifest;
-  } catch (err: any) {
+  } catch {
     return null;
   }
 }
 
-function resolveTaskDir(taskDir: string): DiscoveredTask | null {
+function readSchema(path: string): object | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as object;
+  } catch {
+    return null;
+  }
+}
+
+function namespaceOf(id: string): string {
+  const separator = id.indexOf(":");
+  return separator >= 0 ? id.slice(0, separator) : "default";
+}
+
+function resolveTaskDir(
+  taskDir: string,
+  source: string,
+  namespaceOverride?: string,
+): ResolvedTaskDir {
+  const folder = basename(taskDir);
   const settingsPath = join(taskDir, "settings.json");
   const indexPath = join(taskDir, "index.ts");
   const readmePath = join(taskDir, "README.md");
+  const warnings: string[] = [];
 
-  // Check required files exist
-  if (!existsSync(settingsPath)) return null;
-  if (!existsSync(indexPath)) return null;
-  if (!existsSync(readmePath)) return null;
+  if (!existsSync(settingsPath)) {
+    return {
+      task: null,
+      warnings: [`${source} task folder ${folder}: missing settings.json (skipped)`],
+    };
+  }
 
   const manifest = parseManifest(settingsPath);
-  if (!manifest || !manifest.id) return null;
+  if (!manifest) {
+    return {
+      task: null,
+      warnings: [
+        `${source} task folder ${folder}: cannot parse settings.json (skipped)`,
+      ],
+    };
+  }
+  if (typeof manifest.id !== "string" || manifest.id.length === 0) {
+    return {
+      task: null,
+      warnings: [
+        `${source} task folder ${folder}: settings.json must declare an id (skipped)`,
+      ],
+    };
+  }
 
-  const namespace = manifest.namespace ?? "default";
+  const namespace = namespaceOverride ?? manifest.namespace ?? "default";
   const id = `${namespace}:${manifest.id}`;
 
-  // Resolve schema path if specified
+  if (!existsSync(indexPath)) {
+    warnings.push(`Task ${id}: missing entrypoint index.ts (skipped)`);
+  }
+  if (!existsSync(readmePath)) {
+    warnings.push(`Task ${id}: missing README.md (skipped)`);
+  }
+
+  // Resolve and parse the schema up front. A task with an unreadable or
+  // malformed schema is skipped with a warning (D3), not silently treated as
+  // schema-less.
   let schemaPath: string | null = null;
   if (manifest.inputSchema) {
-    const schemaCandidate = join(taskDir, manifest.inputSchema);
-    if (existsSync(schemaCandidate)) {
-      schemaPath = schemaCandidate;
+    const candidate = join(taskDir, manifest.inputSchema);
+    if (!existsSync(candidate)) {
+      warnings.push(
+        `Task ${id}: input schema not found: ${manifest.inputSchema} (skipped)`,
+      );
+    } else if (!readSchema(candidate)) {
+      warnings.push(
+        `Task ${id}: cannot read input schema ${manifest.inputSchema} (skipped)`,
+      );
+    } else {
+      schemaPath = candidate;
     }
   }
 
+  if (warnings.length > 0) {
+    return { task: null, warnings };
+  }
+
   return {
-    id,
-    manifest,
-    entryPoint: join(taskDir, "index.ts"),
-    schemaPath,
+    task: {
+      id,
+      manifest,
+      entryPoint: indexPath,
+      schemaPath,
+      warnings: [],
+    },
     warnings: [],
   };
 }
 
-export function discoverProjectTasks(projectRoot: string): DiscoveredTask[] {
-  const tasksDir = join(projectRoot, "tasks");
+function scanTasksDir(
+  tasksDir: string,
+  source: string,
+  warnings: string[],
+  namespaceOverride?: string,
+): DiscoveredTask[] {
   if (!existsSync(tasksDir)) return [];
 
   const entries = readdirSync(tasksDir, { withFileTypes: true });
@@ -94,33 +169,30 @@ export function discoverProjectTasks(projectRoot: string): DiscoveredTask[] {
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const taskDir = join(tasksDir, entry.name);
-    const discovered = resolveTaskDir(taskDir);
-    if (discovered) {
-      tasks.push(discovered);
-    }
+    const resolved = resolveTaskDir(
+      join(tasksDir, entry.name),
+      source,
+      namespaceOverride,
+    );
+    warnings.push(...resolved.warnings);
+    if (resolved.task) tasks.push(resolved.task);
   }
 
   return tasks;
 }
 
-export function discoverUserTasks(): DiscoveredTask[] {
-  const userTasksDir = join(homedir(), DEFAULT_DATA_DIR_NAME, "tasks");
-  if (!existsSync(userTasksDir)) return [];
+export function discoverProjectTasks(
+  projectRoot: string,
+  warnings: string[] = [],
+): DiscoveredTask[] {
+  return scanTasksDir(join(projectRoot, "tasks"), "project", warnings);
+}
 
-  const entries = readdirSync(userTasksDir, { withFileTypes: true });
-  const tasks: DiscoveredTask[] = [];
-
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const taskDir = join(userTasksDir, entry.name);
-    const discovered = resolveTaskDir(taskDir);
-    if (discovered) {
-      tasks.push(discovered);
-    }
-  }
-
-  return tasks;
+export function discoverUserTasks(
+  warnings: string[] = [],
+  userTasksDir: string = join(homedir(), DEFAULT_DATA_DIR_NAME, "tasks"),
+): DiscoveredTask[] {
+  return scanTasksDir(userTasksDir, "user", warnings);
 }
 
 export interface PackageLocation {
@@ -131,23 +203,34 @@ export interface PackageLocation {
 
 export function discoverPackageTasks(
   locations: PackageLocation[],
+  warnings: string[] = [],
 ): DiscoveredTask[] {
   const tasks: DiscoveredTask[] = [];
 
   for (const loc of locations) {
-    if (!existsSync(loc.tasksDir)) continue;
-
-    const entries = readdirSync(loc.tasksDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const taskDir = join(loc.tasksDir, entry.name);
-      const discovered = resolveTaskDir(taskDir);
-      if (discovered) {
-        // Override namespace from package
-        discovered.id = `${loc.namespace}:${discovered.manifest.id}`;
-        tasks.push(discovered);
-      }
+    // Installed packages must not claim the reserved project/user namespace.
+    if (!loc.namespace || loc.namespace === "default") {
+      warnings.push(
+        `Task package ${loc.name} declares reserved namespace "default"; its tasks are skipped`,
+      );
+      continue;
     }
+
+    if (!existsSync(loc.tasksDir)) {
+      warnings.push(
+        `Task package ${loc.name}: tasks directory not found: ${loc.tasksDir} (skipped)`,
+      );
+      continue;
+    }
+
+    tasks.push(
+      ...scanTasksDir(
+        loc.tasksDir,
+        `package ${loc.name}`,
+        warnings,
+        loc.namespace,
+      ),
+    );
   }
 
   return tasks;
@@ -155,74 +238,55 @@ export function discoverPackageTasks(
 
 export function discoverAllTasks(
   projectRoot: string,
-  db: DB,
+  _db: DB,
   packageLocations: PackageLocation[] = [],
+  userTasksDir?: string,
 ): DiscoveryResult {
   const warnings: string[] = [];
   const seen = new Map<string, string>(); // id -> source
   const tasks: DiscoveredTask[] = [];
 
-  // 1. Project tasks (highest precedence)
-  const projectTasks = discoverProjectTasks(projectRoot);
-  for (const task of projectTasks) {
+  function add(task: DiscoveredTask, source: string): void {
     const existing = seen.get(task.id);
     if (existing) {
       warnings.push(
-        `Task ${task.id} from project shadows ${existing} (skipped)`,
+        `Task ${task.id} from ${source} is shadowed by ${existing} (skipped)`,
       );
-      continue;
+      return;
     }
-    seen.set(task.id, "project");
+    seen.set(task.id, source);
     tasks.push(task);
+  }
+
+  // 1. Project tasks (highest precedence)
+  for (const task of discoverProjectTasks(projectRoot, warnings)) {
+    add(task, "project");
   }
 
   // 2. User tasks
-  const userTasks = discoverUserTasks();
-  for (const task of userTasks) {
-    const existing = seen.get(task.id);
-    if (existing && existing !== "project") {
-      warnings.push(
-        `Task ${task.id} from user folder shadows ${existing} (skipped)`,
-      );
-      continue;
-    }
-    if (existing === "project") {
-      // Project wins over user — skip user task silently
-      continue;
-    }
-    seen.set(task.id, "user");
-    tasks.push(task);
+  for (const task of discoverUserTasks(warnings, userTasksDir)) {
+    add(task, "user folder");
   }
 
   // 3. Package tasks (lowest precedence)
-  const packageTasks = discoverPackageTasks(packageLocations);
-  for (const task of packageTasks) {
-    const existing = seen.get(task.id);
-    if (existing) {
-      warnings.push(
-        `Task ${task.id} from package ${task.manifest.name || "unknown"} shadows ${existing} (skipped)`,
-      );
-      continue;
-    }
-    seen.set(task.id, "package");
-    tasks.push(task);
+  for (const task of discoverPackageTasks(packageLocations, warnings)) {
+    add(task, `package ${namespaceOf(task.id)}`);
   }
 
   return { tasks, warnings };
 }
 
 export function loadTaskIntoDatabase(db: DB, task: DiscoveredTask): boolean {
-  // Check if task already exists
   const existing = getTask(db, task.id);
   if (existing) {
-    // Update if manifest changed
     const manifestJson = JSON.stringify(task.manifest);
     if (existing.manifest_hash !== manifestJson) {
       task.warnings.push(`Task ${task.id} manifest updated`);
     }
   }
 
-  // Read schema if present
+  // The schema was parsed during discovery; re-read it here so the database
+  // holds the exact text. Discovery has already rejected unreadable schemas.
   let inputSchema = null;
   if (task.schemaPath) {
     try {
@@ -234,7 +298,7 @@ export function loadTaskIntoDatabase(db: DB, task: DiscoveredTask): boolean {
 
   insertTask(db, {
     id: task.id,
-    namespace: task.manifest.namespace ?? "default",
+    namespace: namespaceOf(task.id),
     name: task.manifest.name ?? task.manifest.id,
     description: task.manifest.description ?? "",
     category: task.manifest.category ?? null,
@@ -247,7 +311,6 @@ export function loadTaskIntoDatabase(db: DB, task: DiscoveredTask): boolean {
     entry_point: task.entryPoint,
   });
 
-  // Ensure queue exists
   ensureQueue(db, task.id, task.manifest.concurrency ?? 1);
 
   return true;
@@ -266,20 +329,10 @@ export function loadAllTasks(
     loaded++;
   }
 
-  // Collect all warnings
   const allWarnings = [...result.warnings];
   for (const task of result.tasks) {
-    if (task.warnings.length > 0) {
-      const existing = allWarnings.find((w) => w.includes(task.id));
-      if (!existing) {
-        allWarnings.push(...task.warnings);
-      }
-    }
+    allWarnings.push(...task.warnings);
   }
-
-  // Also collect warnings from tasks that failed to load
-  const failedTasks = discoverAllTasks(projectRoot, db, packageLocations);
-  // (Re-discovery to find tasks that were skipped due to conflicts)
 
   return { loaded, warnings: allWarnings };
 }

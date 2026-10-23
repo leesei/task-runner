@@ -32,14 +32,22 @@ import { readLogFile, type LogRecord } from "../db/logs.ts";
 import { ensureQueuesForTasks } from "../runner/queue-state.ts";
 import { getPackageLocations } from "../tasks/lockfile.ts";
 import { loadAllTasks } from "../tasks/discovery.ts";
+import {
+  parseSchema,
+  validateContext,
+  type ValidationIssue,
+} from "./validation.ts";
 
 export class CoreError extends Error {
   readonly code: string;
+  /** Present for INPUT_SCHEMA_VIOLATION. */
+  readonly issues?: ValidationIssue[];
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, issues?: ValidationIssue[]) {
     super(message);
     this.name = "CoreError";
     this.code = code;
+    this.issues = issues;
   }
 }
 
@@ -97,13 +105,38 @@ export function enqueueTask(db: DB, taskId: string, input: unknown): number {
     throw new CoreError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
   }
 
+  // Validate before touching queue or instance state: a violation creates no
+  // instance. CLI and HTTP share this path, so they cannot disagree.
+  const { value, issues } = validateContext(task.input_schema, input);
+  if (issues.length > 0) {
+    throw new CoreError(
+      "INPUT_SCHEMA_VIOLATION",
+      `Context does not match the schema for ${taskId}`,
+      issues,
+    );
+  }
+
   ensureQueue(db, taskId, task.concurrency);
   const queue = getQueue(db, taskId);
   if (queue?.state === "IDLE") {
     updateQueueState(db, taskId, "PROCESSING");
   }
 
-  return insertInstance(db, taskId, JSON.stringify(input), null);
+  return insertInstance(db, taskId, JSON.stringify(value), null);
+}
+
+/**
+ * The parsed input schema for a task, or null when it has none.
+ *
+ * The CLI needs the schema before enqueueing to wrap a bare argument and to
+ * resolve `format: "path"` values; the core still validates the final value.
+ */
+export function getTaskInputSchema(db: DB, taskId: string): object | null {
+  const task = getTask(db, taskId);
+  if (!task) {
+    throw new CoreError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
+  }
+  return parseSchema(task.input_schema);
 }
 
 export function listQueues(db: DB): QueueSummary[] {

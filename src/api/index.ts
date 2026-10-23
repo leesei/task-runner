@@ -46,9 +46,16 @@ export interface ApiError {
   message: string;
 }
 
-function jsonError(code: string, message: string, status: number): Response {
+function jsonError(
+  code: string,
+  message: string,
+  status: number,
+  issues?: unknown[],
+): Response {
+  const body: ApiError & { issues?: unknown[] } = { code, message };
+  if (issues !== undefined) body.issues = issues;
   return new Response(
-    JSON.stringify({ code, message } as ApiError),
+    JSON.stringify(body),
     { status, headers: { "Content-Type": "application/json" } },
   );
 }
@@ -254,6 +261,9 @@ export function createApi(h: ApiHandlers) {
     } catch (err) {
       if (err instanceof CoreError && err.code === "TASK_NOT_FOUND") {
         return jsonError(err.code, err.message, 404);
+      }
+      if (err instanceof CoreError && err.code === "INPUT_SCHEMA_VIOLATION") {
+        return jsonError(err.code, err.message, 400, err.issues ?? []);
       }
       throw err;
     }
