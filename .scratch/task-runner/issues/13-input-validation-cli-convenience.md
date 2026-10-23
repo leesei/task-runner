@@ -42,5 +42,5 @@ Implemented on `ticket-13-validation` in `914794c`.
 - Discovery now reports shadowing and load failures, and rejects package tasks claiming the reserved `default` namespace.
 - Dependency: `ajv@^8.20.0` added to `package.json` and `bun.lock`.
 
-Evidence: `bun test` → 68 pass / 0 fail (10 files); `bun run build` succeeds. CLI probe: `{"count":0}` printed `/filepath` and `/count`, exited 2, created no row; `{"filepath":"fixture/1"}` stored the absolute path and exited 0.
+Evidence: after merging `feat/task-runner-spec`, `bun test` → 88 pass / 0 fail (12 files); `bun run build` succeeds. CLI probe: `{"count":0}` printed `/filepath` and `/count`, exited 2, created no row; `{"filepath":"fixture/1"}` stored the absolute path and exited 0. Sample-task probe: `tq add default:ls tests/1` and `tq add default:cat '{"filepath":"tests/sha256/hello.txt","limit":3}'` both stored absolute paths and exited 0; discovery reported no spurious warnings for `tasks/lib`.
 
