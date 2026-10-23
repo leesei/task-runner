@@ -26,7 +26,15 @@ export function getLogPath(db: DB, instanceId: number): string | null {
 export function appendLog(db: DB, instanceId: number, stream: "stdout" | "stderr", text: string): void {
   const instance = getInstance(db, instanceId);
   if (!instance?.log_path) return;
+  appendLogLine(instance.log_path, stream, text);
+}
 
+/** Append one JSONL record to an explicit log path. */
+export function appendLogLine(
+  logPath: string,
+  stream: "stdout" | "stderr",
+  text: string,
+): void {
   const record: LogRecord = {
     timestamp: new Date().toISOString(),
     stream,
@@ -34,7 +42,15 @@ export function appendLog(db: DB, instanceId: number, stream: "stdout" | "stderr
   };
 
   const fs = require("node:fs");
-  fs.appendFileSync(instance.log_path, JSON.stringify(record) + "\n");
+  fs.appendFileSync(logPath, JSON.stringify(record) + "\n");
+}
+
+/** Create the log file if needed. Existing content is preserved. */
+export function ensureLogFile(logPath: string): void {
+  const fs = require("node:fs");
+  if (!fs.existsSync(logPath)) {
+    fs.writeFileSync(logPath, "");
+  }
 }
 
 export function readLogFile(logPath: string): LogRecord[] {
@@ -62,9 +78,8 @@ export function mergeLogRecords(records: LogRecord[]): string {
 }
 
 export function createLogFile(logDir: string, instanceId: number): string {
-  const fs = require("node:fs");
   const logPath = `${logDir}/instance-${instanceId}.jsonl`;
-  fs.writeFileSync(logPath, "");
+  ensureLogFile(logPath);
   return logPath;
 }
 

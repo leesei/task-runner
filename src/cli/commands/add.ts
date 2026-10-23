@@ -10,18 +10,8 @@
  * core so the HTTP API rejects exactly the same contexts.
  */
 
-import {
-  bootstrapDataDir,
-  closeDatabase,
-  configureDatabase,
-  openDatabase,
-  resolveDataDir,
-} from "../../db/database.ts";
-import {
-  CoreError,
-  enqueueTask,
-  getTaskInputSchema,
-} from "../../core/service.ts";
+import { CoreError } from "../../core/service.ts";
+import { openCliCore } from "../core.ts";
 import { buildContext, UsageError } from "../context.ts";
 
 const ADD_USAGE = "Usage: tq add <task> [context]";
@@ -39,19 +29,16 @@ export async function commandAdd(
 
   const taskId = args[0]!;
 
-  const dbConfig = resolveDataDir(dataDir);
-  let db;
+  let cli;
   try {
-    bootstrapDataDir(dbConfig);
-    db = openDatabase(dbConfig.dbPath);
-    configureDatabase(db);
+    cli = openCliCore(dataDir, { bootstrap: true, projectRoot: cwd });
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
   try {
-    const schema = getTaskInputSchema(db, taskId);
+    const schema = cli.core.getTaskInputSchema(taskId);
 
     let input: unknown;
     try {
@@ -65,7 +52,7 @@ export async function commandAdd(
       throw err;
     }
 
-    const id = enqueueTask(db, taskId, input);
+    const { id } = cli.core.enqueue(taskId, input);
     console.log(`Enqueued instance ${id} on task ${taskId}`);
     console.log(`Input: ${JSON.stringify(input)}`);
     return 0;
@@ -84,6 +71,6 @@ export async function commandAdd(
     console.error(`Error: ${err.message}`);
     return 1;
   } finally {
-    closeDatabase(db);
+    cli.close();
   }
 }

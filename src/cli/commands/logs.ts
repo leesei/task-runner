@@ -5,8 +5,7 @@
  * HTTP API, so it works with the daemon stopped.
  */
 
-import { closeDatabase, openDatabase, resolveDataDir } from "../../db/database.ts";
-import { readInstanceLog } from "../../core/service.ts";
+import { openCliCore } from "../core.ts";
 
 function printRecords(records: { timestamp: string; stream: string; text: string }[]): void {
   if (records.length === 0) {
@@ -35,17 +34,16 @@ export async function commandLogs(
     return 2;
   }
 
-  const dbConfig = resolveDataDir(dataDir);
-  let db;
+  let cli;
   try {
-    db = openDatabase(dbConfig.dbPath);
+    cli = openCliCore(dataDir);
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
   try {
-    const log = readInstanceLog(db, instanceId);
+    const log = cli.core.readInstanceLog(instanceId);
     if (!log) {
       console.error(`Instance not found: ${instanceId}`);
       return 2;
@@ -63,6 +61,6 @@ export async function commandLogs(
     console.error(`Error: ${err.message}`);
     return 1;
   } finally {
-    closeDatabase(db);
+    cli.close();
   }
 }

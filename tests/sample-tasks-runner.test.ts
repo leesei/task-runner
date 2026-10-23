@@ -11,10 +11,10 @@ import {
   type DB,
 } from "../src/db/database.ts";
 import { readLogFile } from "../src/db/logs.ts";
-import { getInstance, insertInstance } from "../src/db/queries.ts";
+import { getInstance } from "../src/db/queries.ts";
 import { installConsoleInterception } from "../src/runner/execution.ts";
-import { autostartQueuesOnBoot, ensureQueuesForTasks } from "../src/runner/queue-state.ts";
 import { createRunner } from "../src/runner/runner.ts";
+import { createHarness, type TestHarness } from "./support/harness.ts";
 import { loadAllTasks } from "../src/tasks/discovery.ts";
 
 const projectDir = process.cwd();
@@ -22,6 +22,7 @@ const projectDir = process.cwd();
 let dataDir: string;
 let db: DB;
 let runner: ReturnType<typeof createRunner>;
+let harness: TestHarness;
 const tempDirs: string[] = [];
 
 function makeTempDir(prefix: string): string {
@@ -31,13 +32,13 @@ function makeTempDir(prefix: string): string {
 }
 
 function enqueue(taskId: string, input: unknown): number {
-  return insertInstance(db, taskId, JSON.stringify(input), null);
+  return harness.lifecycle.enqueue(taskId, input).id;
 }
 
 async function runToCompletion(ids: number[]): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    await runner.runOnce(db);
+    await runner.runOnce();
     const states = ids.map((id) => getInstance(db, id)?.state);
     if (states.every((state) => state === "SUCCESS" || state === "FAILED")) {
       return;
@@ -63,11 +64,12 @@ beforeAll(() => {
   configureDatabase(db);
 
   loadAllTasks(db, projectDir, []);
-  ensureQueuesForTasks(db);
-  autostartQueuesOnBoot(db);
+  harness = createHarness(db, dataDir, projectDir);
+  harness.lifecycle.syncQueues();
+  harness.lifecycle.recoverOnBoot();
   installConsoleInterception();
 
-  runner = createRunner({ dataDir, pollIntervalMs: 5 });
+  runner = createRunner({ db, lifecycle: harness.lifecycle, pollIntervalMs: 5 });
 });
 
 afterAll(() => {

@@ -1,33 +1,15 @@
 /**
- * Execution context, console interception, and log capture.
+ * Execution: task module import, timeout enforcement, console interception,
+ * and append-only log capture.
  *
- * The runner calls a task's default export with { input, signal, done },
- * captures console.log/console.error to JSONL log files, and maps completion
- * to instance state.
- *
- * Each execution runs inside an AsyncLocalStorage scope tagged with the
- * active instance id, so concurrent instances write to the correct log.
- *
- * Ticket 07 additions:
- * - Timeout enforcement: if the task doesn't complete within timeoutMs,
- *   the instance is marked FAILED with reason 'timeout' and does NOT
- *   return to PENDING.
- * - Abort handling: when the abort signal fires, the instance is returned
- *   to PENDING with its attempt number incremented (partial log preserved).
- * - Completion callback: done(exitCode) marks SUCCESS (0) or FAILED (non-zero).
- *   A task that returns without calling done is treated as exit code 0.
+ * The runner hands over a `Claim` and an `AbortSignal`. Execution owns
+ * everything between claim and completion; it never writes queue or instance
+ * state except through `lifecycle.finishRun(claim, outcome)`.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { DB } from "../db/database.ts";
-import { appendLog, createLogFile } from "../db/logs.ts";
-import {
-  updateInstanceState,
-  getInstance,
-  incrementAttempt,
-} from "../db/queries.ts";
-import { emitInstanceStateChanged } from "../api/index.ts";
-import type { InstanceState } from "../db/schema.ts";
+import type { Claim, Lifecycle, RunOutcome } from "../core/lifecycle.ts";
+import { appendLogLine, ensureLogFile } from "../db/logs.ts";
 
 // ─── Execution Context ─────────────────────────────────────────────────────────
 
@@ -41,10 +23,13 @@ export interface ExecutionContext<TInput = unknown> {
 
 export interface InstanceContext {
   instanceId: number;
-  db: DB;
+  attempt: number;
+  logPath: string;
+  /** False once this attempt is superseded; late output is discarded. */
+  active: boolean;
 }
 
-const instanceStore = new AsyncLocalStorage<InstanceContext | null>();
+const instanceStore = new AsyncLocalStorage<InstanceContext>();
 
 export function runInInstanceContext<T>(
   context: InstanceContext,
@@ -75,8 +60,9 @@ export function installConsoleInterception(): void {
       originalLog.call(console, ...args);
       return;
     }
-    const text = args.map(a => String(a)).join(" ");
-    appendLog(ctx.db, ctx.instanceId, "stdout", text);
+    if (ctx.active) {
+      appendLogLine(ctx.logPath, "stdout", args.map(String).join(" "));
+    }
     originalLog.call(console, ...args);
   };
 
@@ -86,8 +72,9 @@ export function installConsoleInterception(): void {
       originalError.call(console, ...args);
       return;
     }
-    const text = args.map(a => String(a)).join(" ");
-    appendLog(ctx.db, ctx.instanceId, "stderr", text);
+    if (ctx.active) {
+      appendLogLine(ctx.logPath, "stderr", args.map(String).join(" "));
+    }
     originalError.call(console, ...args);
   };
 
@@ -104,140 +91,126 @@ export function uninstallConsoleInterception(): void {
 
 // ─── Task Execution ────────────────────────────────────────────────────────────
 
+let importCounter = 0;
+
+function importSpecifier(entryPoint: string, attempt: number): string {
+  const version = `${Date.now()}-${attempt}-${++importCounter}`;
+  const separator = entryPoint.includes("?") ? "&" : "?";
+  return `${entryPoint}${separator}v=${version}`;
+}
+
 /**
- * Complete an instance only if it is still RUNNING. An aborted or timed-out
- * instance may have been moved to PENDING/FAILED already; late writes from the
- * superseded attempt must not overwrite that state.
+ * Execute one claim. Completion is reported through the fenced
+ * `finishRun(claim, outcome)`; a stale attempt's result is ignored.
  */
-function finishInstance(
-  db: DB,
-  instanceId: number,
-  state: InstanceState,
-  exitCode?: number,
-  failureReason?: string,
-): boolean {
-  const instance = getInstance(db, instanceId);
-  if (!instance || instance.state !== "RUNNING") return false;
-
-  updateInstanceState(db, instanceId, state, exitCode, failureReason);
-  emitInstanceStateChanged(instanceId, state);
-  return true;
-}
-
-export interface TaskDefinition {
-  id: string;
-  entryPoint: string;  // Resolved path to index.ts
-  timeoutMs: number;
-}
-
 export async function executeTask(
-  db: DB,
-  instanceId: number,
-  task: TaskDefinition,
-  input: unknown,
+  claim: Claim,
+  lifecycle: Lifecycle,
   signal: AbortSignal,
-  logDir: string,
   abort: () => void,
 ): Promise<void> {
-  // Create log file
-  const logPath = createLogFile(logDir, instanceId);
+  // Append across attempts: never truncate an earlier attempt's output.
+  ensureLogFile(claim.logPath);
 
-  // Update instance with log path
-  db.run("UPDATE instances SET log_path = ? WHERE id = ?", [logPath, instanceId]);
+  const context: InstanceContext = {
+    instanceId: claim.instanceId,
+    attempt: claim.attempt,
+    logPath: claim.logPath,
+    active: true,
+  };
 
-  // Flag to track if done was called
   let completed = false;
-  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
-  const ctx: ExecutionContext<typeof input> = {
-    input,
+  const finish = (outcome: RunOutcome): void => {
+    if (completed) return;
+    completed = true;
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = undefined;
+    }
+    const result = lifecycle.finishRun(claim, outcome);
+    if (!result.applied) {
+      console.warn(
+        `Instance ${claim.instanceId} attempt ${claim.attempt}: completion ignored (${result.ignored ?? "unknown"})`,
+      );
+    }
+  };
+
+  const ctx: ExecutionContext = {
+    input: claim.input,
     signal,
     done: (exitCode: number) => {
       if (completed) {
-        // Second done call — record warning but ignore
-        console.warn(`Instance ${instanceId}: second done() call ignored (exitCode was ${exitCode})`);
+        console.warn(
+          `Instance ${claim.instanceId}: second done() call ignored (exitCode ${exitCode})`,
+        );
         return;
       }
-      completed = true;
-
-      if (exitCode === 0) {
-        finishInstance(db, instanceId, "SUCCESS");
-      } else {
-        finishInstance(db, instanceId, "FAILED", exitCode);
-      }
+      finish(
+        exitCode === 0
+          ? { kind: "success" }
+          : { kind: "failure", exitCode },
+      );
     },
   };
 
-  // Set up timeout
-  if (task.timeoutMs > 0) {
-    const timeoutHandle = setTimeout(() => {
-      if (completed) return;
-      timedOut = true;
-      completed = true;
-      // Timeout: mark FAILED with reason 'timeout', do NOT return to PENDING
-      finishInstance(db, instanceId, "FAILED", undefined, "timeout");
-      abort();
-    }, task.timeoutMs);
-
-    // Clear timeout on completion
-    const originalDone = ctx.done;
-    ctx.done = (exitCode: number) => {
+  const onAbort = (): void => {
+    // The abort already returned the instance to PENDING in the lifecycle.
+    // Stop accepting this attempt's late output; the completion fence stops
+    // its late state writes.
+    context.active = false;
+    if (timeoutHandle !== undefined) {
       clearTimeout(timeoutHandle);
-      originalDone(exitCode);
-    };
+      timeoutHandle = undefined;
+    }
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  if (claim.timeoutMs > 0) {
+    timeoutHandle = setTimeout(() => {
+      // Commit the timeout before firing the signal: a done() from the task's
+      // abort handler must be a late completion, not the winner.
+      finish({ kind: "timeout" });
+      abort();
+    }, claim.timeoutMs);
   }
 
-  // Run the task inside the AsyncLocalStorage context
-  const result = await runInInstanceContext(
-    { instanceId, db },
-    async () => {
-      // Import the task entrypoint dynamically
-      // Use cache-busting query parameter to pick up changes on reload
-      const importPath = task.entryPoint;
-      const module = await import(importPath);
+  try {
+    await runInInstanceContext(context, async () => {
+      const module = await import(importSpecifier(claim.entryPoint, claim.attempt));
 
       const taskFn = module.default;
       if (!taskFn || typeof taskFn !== "function") {
-        console.error(`Task ${task.id}: no default export found`);
-        if (!completed) {
-          finishInstance(db, instanceId, "FAILED", 1, "no_default_export");
-        }
+        console.error(`Task ${claim.taskId}: no default export found`);
+        finish({ kind: "failure", exitCode: 1, reason: "no_default_export" });
         return;
       }
 
-      // Run the task function
       try {
         await taskFn(ctx);
-
-        // If task returns without calling done, treat as success
         if (!completed) {
-          finishInstance(db, instanceId, "SUCCESS");
+          finish({ kind: "success" });
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (!completed) {
-          const message = err?.message ?? String(err);
-          console.error(`Task ${task.id}: ${message}`);
-          finishInstance(db, instanceId, "FAILED", 1, message);
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`Task ${claim.taskId}: ${message}`);
+          finish({ kind: "failure", exitCode: 1, reason: message });
         }
       }
-    },
-  );
-
-  return result;
-}
-
-// ─── Abort Handling ────────────────────────────────────────────────────────────
-
-export async function abortInstance(
-  db: DB,
-  instanceId: number,
-  gracePeriodMs: number,
-): Promise<void> {
-  const instance = getInstance(db, instanceId);
-  if (!instance || instance.state !== "RUNNING") return;
-
-  // Return to PENDING with incremented attempt number.
-  // Partial log is preserved (log file is not deleted).
-  incrementAttempt(db, instanceId);
-  updateInstanceState(db, instanceId, "PENDING");
+    });
+  } catch (err: unknown) {
+    if (!completed) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Task ${claim.taskId}: ${message}`);
+      finish({ kind: "failure", exitCode: 1, reason: message });
+    }
+  } finally {
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = undefined;
+    }
+    signal.removeEventListener("abort", onAbort);
+  }
 }

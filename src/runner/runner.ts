@@ -1,94 +1,84 @@
 /**
  * Task runner loop.
  *
- * Picks PENDING instances from PROCESSING queues in FIFO order,
- * respecting per-queue concurrency.
- *
- * For each launched instance:
- *   1. Mark as RUNNING with started_at
- *   2. Create an AbortController and pass its signal to the task
- *   3. Execute with timeout enforcement
- *   4. On completion: mark SUCCESS/FAILED, set ended_at/duration
- *   5. On timeout: mark FAILED with reason 'timeout', do NOT return to PENDING
- *   6. On abort: return to PENDING with incremented attempt, preserve partial log
- *
- * Actual task execution (loading entrypoint, running function,
- * console interception, log capture) is in execution.ts.
+ * The runner consumes durable control requests and claims work from the
+ * lifecycle. It owns the AbortController registry (keyed by
+ * `instanceId:attempt`), the reload callback, and polling. It never writes
+ * queue or instance state.
  */
 
 import type { DB } from "../db/database.ts";
-import { resolveDataDir } from "../db/database.ts";
-import { DEFAULT_DATA_DIR_NAME } from "../defaults.ts";
 import {
-  getInstance,
+  getControlRequestTokens,
   getPendingControlRequests,
-  getPendingInstances,
-  getQueue,
-  getRunningInstances,
-  getTask,
-  incrementAttempt,
   markControlRequestConsumed,
-  updateInstanceState,
-  updateQueueState,
 } from "../db/queries.ts";
+import type { Lifecycle } from "../core/lifecycle.ts";
 import { executeTask } from "./execution.ts";
-import { checkDrained } from "./queue-state.ts";
 
 export interface RunnerConfig {
-  pollIntervalMs: number;
-  dataDir: string;
+  db: DB;
+  lifecycle: Lifecycle;
+  pollIntervalMs?: number;
+  /** Time a cancelled attempt gets to settle before the runner moves on. */
+  abortGraceMs?: number;
   onReload?: () => void | Promise<void>;
 }
 
-const DEFAULT_CONFIG: RunnerConfig = {
-  pollIntervalMs: 1000,
-  dataDir: DEFAULT_DATA_DIR_NAME,
-};
+interface ControllerEntry {
+  controller: AbortController;
+  settled: Promise<void>;
+}
 
-export function createRunner(config: Partial<RunnerConfig> = {}) {
-  const cfg = { ...DEFAULT_CONFIG, ...config };
-  const dbConfig = resolveDataDir(cfg.dataDir);
-  const controllers = new Map<number, AbortController>();
+const DEFAULT_POLL_INTERVAL_MS = 1000;
+const DEFAULT_ABORT_GRACE_MS = 5000;
 
-  async function processControlRequests(db: DB): Promise<void> {
+export function createRunner(config: RunnerConfig) {
+  const { db, lifecycle } = config;
+  const pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const abortGraceMs = config.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS;
+  const controllers = new Map<string, ControllerEntry>();
+
+  function controllerKey(token: { instanceId: number; attempt: number }): string {
+    return `${token.instanceId}:${token.attempt}`;
+  }
+
+  async function processControlRequests(): Promise<void> {
     const requests = getPendingControlRequests(db);
 
     for (const request of requests) {
-      if (request.kind === "abort") {
-        let instanceIds: number[] = [];
-        try {
-          const parsed = JSON.parse(request.instance_ids ?? "[]") as unknown;
-          if (Array.isArray(parsed)) {
-            instanceIds = parsed.filter((id): id is number => typeof id === "number");
-          }
-        } catch {
-          instanceIds = [];
-        }
+      if (request.kind === "abort" && request.queue_id) {
+        const tokens = getControlRequestTokens(request);
+        // No RUNNING work when the request was written: abort is an
+        // idempotent stop, so the queue still ends STOPPED. A request that
+        // recorded tokens is fenced; stale tokens change nothing.
+        const result =
+          tokens.length === 0
+            ? lifecycle.abortQueue(request.queue_id)
+            : lifecycle.abortQueue(request.queue_id, tokens);
 
-        for (const instanceId of instanceIds) {
-          // Move the instance out of RUNNING before firing the signal: a task
-          // may call done() synchronously from its abort handler, and that
-          // late completion must not win over the abort.
-          const instance = getInstance(db, instanceId);
-          if (instance?.state === "RUNNING") {
-            incrementAttempt(db, instanceId);
-            updateInstanceState(db, instanceId, "PENDING");
+        if (!result.discarded) {
+          const entries = result.cancelled
+            .map((token) => controllers.get(controllerKey(token)))
+            .filter((entry): entry is ControllerEntry => entry !== undefined);
+
+          for (const entry of entries) {
+            entry.controller.abort();
           }
 
-          const controller = controllers.get(instanceId);
-          controller?.abort();
-          controllers.delete(instanceId);
-        }
-
-        if (request.queue_id) {
-          const queue = getQueue(db, request.queue_id);
-          if (queue && queue.state !== "STOPPED") {
-            updateQueueState(db, request.queue_id, "STOPPED");
+          // Cooperative cancellation: give the task a bounded chance to settle
+          // before the runner claims the returned instance again. A task that
+          // ignores the signal keeps running, but its late writes are fenced.
+          if (entries.length > 0 && abortGraceMs > 0) {
+            await Promise.race([
+              Promise.all(entries.map((entry) => entry.settled)),
+              Bun.sleep(abortGraceMs),
+            ]);
           }
         }
       } else if (request.kind === "reload") {
         try {
-          await cfg.onReload?.();
+          await config.onReload?.();
         } catch (err) {
           console.error("Reload request failed:", err);
         }
@@ -98,104 +88,53 @@ export function createRunner(config: Partial<RunnerConfig> = {}) {
     }
   }
 
-  return {
-    /**
-     * Run one iteration of the runner loop.
-     * Returns the number of instances launched.
-     */
-    async runOnce(db: DB): Promise<number> {
-      await processControlRequests(db);
+  function launch(claims: ReturnType<Lifecycle["claim"]>): number {
+    for (const claim of claims) {
+      const key = controllerKey(claim);
+      const controller = new AbortController();
+      let settle!: () => void;
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
 
-      let launched = 0;
+      controllers.set(key, { controller, settled });
 
-      // Get all PROCESSING queues
-      const queues = db
-        .query<
-          { id: string; concurrency: number },
-          []
-        >("SELECT id, concurrency FROM queues WHERE state = 'PROCESSING' ORDER BY id")
-        .all();
-
-      for (const queue of queues) {
-        // Check concurrency
-        const running = getRunningInstances(db, queue.id);
-        if (running.length >= queue.concurrency) continue;
-
-        // Get pending instances (FIFO by id)
-        const pending = getPendingInstances(db, queue.id);
-        if (pending.length === 0) continue;
-
-        // Launch as many as concurrency allows
-        const slotsAvailable = queue.concurrency - running.length;
-        const toLaunch = Math.min(slotsAvailable, pending.length);
-
-        for (let i = 0; i < toLaunch; i++) {
-          const instance = pending[i];
-          if (!instance) continue;
-          const task = getTask(db, queue.id);
-          if (!task) continue;
-
-          // Parse the input JSON
-          let input: unknown = {};
-          try {
-            input = JSON.parse(instance.input);
-          } catch {
-            input = instance.input;
+      executeTask(claim, lifecycle, controller.signal, () => controller.abort())
+        .catch((err) => {
+          console.error(
+            `Task execution error for instance ${claim.instanceId} attempt ${claim.attempt}:`,
+            err,
+          );
+        })
+        .finally(() => {
+          if (controllers.get(key)?.controller === controller) {
+            controllers.delete(key);
           }
+          settle();
+        });
+    }
 
-          // Mark instance as RUNNING before executing
-          updateInstanceState(db, instance.id, "RUNNING");
+    return claims.length;
+  }
 
-          // Create an AbortController for this instance
-          const controller = new AbortController();
-          controllers.set(instance.id, controller);
-
-          // Execute the task with timeout and abort handling
-          // entrypoint is stored in the tasks table by discovery
-          const entryPoint = task.entry_point ?? `file://${task.id}`;
-          executeTask(
-            db,
-            instance.id,
-            {
-              id: task.id,
-              entryPoint,
-              timeoutMs: task.timeout_ms,
-            },
-            input,
-            controller.signal,
-            dbConfig.logDir,
-            () => controller.abort(),
-          )
-            .catch((err) => {
-              console.error(
-                `Task execution error for instance ${instance.id}:`,
-                err,
-              );
-            })
-            .finally(() => {
-              controllers.delete(instance.id);
-            });
-
-          launched++;
-        }
-      }
-
-      // Check for drained queues
-      for (const queue of queues) {
-        checkDrained(db, queue.id);
-      }
-
-      return launched;
+  return {
+    /** Run one iteration. Returns the number of instances launched. */
+    async runOnce(): Promise<number> {
+      await processControlRequests();
+      return launch(lifecycle.claim());
     },
 
-    /**
-     * Run continuously, polling for work.
-     */
-    async runContinuous(db: DB): Promise<void> {
+    /** Run continuously, polling for work. */
+    async runContinuous(): Promise<void> {
       while (true) {
-        await this.runOnce(db);
-        await Bun.sleep(cfg.pollIntervalMs);
+        await this.runOnce();
+        await Bun.sleep(pollIntervalMs);
       }
+    },
+
+    /** Visible for tests and shutdown paths. */
+    activeControllerKeys(): string[] {
+      return [...controllers.keys()];
     },
   };
 }

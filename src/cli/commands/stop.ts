@@ -5,8 +5,8 @@
  * live; liveness comes from the descriptor pid, never HTTP.
  */
 
-import { stopQueue } from "../../core/service.ts";
-import { closeDatabase, openDatabase, resolveDataDir } from "../../db/database.ts";
+import { CoreError } from "../../core/service.ts";
+import { openCliCore } from "../core.ts";
 
 export async function commandStop(
   dataDir: string,
@@ -24,24 +24,26 @@ export async function commandStop(
     return 1;
   }
 
-  const dbConfig = resolveDataDir(dataDir);
-  let db;
+  let cli;
   try {
-    db = openDatabase(dbConfig.dbPath);
+    cli = openCliCore(dataDir);
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
   try {
-    const result = stopQueue(db, queueId);
-    if (!result.success) {
-      console.error(result.message);
-      return 1;
-    }
-    console.log(result.message);
+    const state = cli.core.stop(queueId);
+    console.log(`Queue ${queueId} is ${state}`);
     return 0;
+  } catch (err: any) {
+    if (err instanceof CoreError && err.code === "QUEUE_NOT_FOUND") {
+      console.error(err.message);
+      return 2;
+    }
+    console.error(err.message);
+    return 1;
   } finally {
-    closeDatabase(db);
+    cli.close();
   }
 }

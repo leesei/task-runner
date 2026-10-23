@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { CoreError, enqueueTask } from "../src/core/service.ts";
+import { CoreError } from "../src/core/service.ts";
+import { createHarness, type TestHarness } from "./support/harness.ts";
 import {
   bootstrapDataDir,
   closeDatabase,
@@ -42,6 +43,7 @@ describe("Seam A: core enqueue validation", () => {
   let dataDir: string;
   let projectDir: string;
   let db: ReturnType<typeof openDatabase>;
+  let harness: TestHarness;
 
   beforeAll(() => {
     dataDir = makeTempDir();
@@ -74,6 +76,7 @@ describe("Seam A: core enqueue validation", () => {
     });
 
     loadAllTasks(db, projectDir, []);
+    harness = createHarness(db, dataDir, projectDir);
   });
 
   afterAll(() => {
@@ -84,7 +87,7 @@ describe("Seam A: core enqueue validation", () => {
 
   test("accepts context matching the schema and applies defaults", () => {
     const input = { filepath: "/tmp/a", count: 2, mode: "fast" };
-    const id = enqueueTask(db, "default:validated", input);
+    const { id } = harness.core.enqueue("default:validated", input);
 
     const stored = getInstance(db, id)!;
     expect(JSON.parse(stored.input)).toEqual({
@@ -102,7 +105,7 @@ describe("Seam A: core enqueue validation", () => {
 
     let caught: unknown;
     try {
-      enqueueTask(db, "default:validated", { count: 1 });
+      harness.core.enqueue("default:validated", { count: 1 });
     } catch (err) {
       caught = err;
     }
@@ -120,7 +123,7 @@ describe("Seam A: core enqueue validation", () => {
   test("reports type, enum, and maximum violations with field paths", () => {
     let caught: unknown;
     try {
-      enqueueTask(db, "default:validated", {
+      harness.core.enqueue("default:validated", {
         filepath: 42,
         count: 9,
         mode: "turbo",
@@ -143,7 +146,7 @@ describe("Seam A: core enqueue validation", () => {
   test("rejects a value below the minimum", () => {
     let caught: unknown;
     try {
-      enqueueTask(db, "default:validated", { filepath: "/tmp/a", count: 0 });
+      harness.core.enqueue("default:validated", { filepath: "/tmp/a", count: 0 });
     } catch (err) {
       caught = err;
     }
@@ -155,11 +158,11 @@ describe("Seam A: core enqueue validation", () => {
 
   test("accepts arbitrary context for a schema-less task", () => {
     const value = { anything: ["goes", 1, null, true] };
-    const id = enqueueTask(db, "default:noschema", value);
+    const { id } = harness.core.enqueue("default:noschema", value);
     expect(JSON.parse(getInstance(db, id)!.input)).toEqual(value);
   });
 
   test("unknown task still fails with TASK_NOT_FOUND", () => {
-    expect(() => enqueueTask(db, "nope:nope", {})).toThrow(CoreError);
+    expect(() => harness.core.enqueue("nope:nope", {})).toThrow(CoreError);
   });
 });

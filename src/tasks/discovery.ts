@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { DEFAULT_DATA_DIR_NAME } from "../defaults.ts";
 import type { DB } from "../db/database.ts";
-import { ensureQueue, getTask, insertTask } from "../db/queries.ts";
+import { getTask, insertTask } from "../db/queries.ts";
 
 export interface TaskManifest {
   namespace?: string;
@@ -319,8 +319,6 @@ export function loadTaskIntoDatabase(db: DB, task: DiscoveredTask): boolean {
       task.warnings.length > 0 ? JSON.stringify(task.warnings) : null,
     entry_point: task.entryPoint,
   });
-
-  ensureQueue(db, task.id, task.manifest.concurrency ?? 1);
 
   return true;
 }
