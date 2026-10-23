@@ -4,7 +4,7 @@
 
 **Blocked by:** 13
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] `src/core/lifecycle.ts` owns queue/instance writes: `enqueue`, `claim`, `claimQueue`, `finishRun`, `abortQueue`, `start`, `stop`, `syncQueues`, `recoverOnBoot`, `clearQueue`
 - [ ] `claim()` is the batched runner call and `claimQueue(queueId)` is the per-queue primitive; both share `claimFromQueue`
