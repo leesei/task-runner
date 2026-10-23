@@ -7,8 +7,8 @@
  * `--tasks` instead dumps the full configuration of every registered task.
  */
 
-import { resolveDataDir, openDatabase, closeDatabase } from "../../db/database.ts";
-import { getAllTasks } from "../../db/queries.ts";
+import { openCliCore } from "../core.ts";
+import { resolveDataDir } from "../../db/database.ts";
 import type { TaskRow } from "../../db/schema.ts";
 import { formatTable } from "../table.ts";
 
@@ -117,10 +117,9 @@ export async function commandConfig(
   printTqConfig(dataDir, daemonPort, projectRoot);
   console.log();
 
-  const dbConfig = resolveDataDir(dataDir);
-  let db;
+  let cli;
   try {
-    db = openDatabase(dbConfig.dbPath);
+    cli = openCliCore(dataDir, { projectRoot });
   } catch (err: any) {
     if (err.message.includes("unable to open") || err.message.includes("no such file")) {
       console.log("No tasks registered. Run `tq daemon` or `tq reload` to discover tasks.");
@@ -131,7 +130,7 @@ export async function commandConfig(
   }
 
   try {
-    const tasks = getAllTasks(db);
+    const tasks = cli.core.listTaskDefinitions();
 
     if (tasks.length === 0) {
       console.log("No tasks registered.");
@@ -147,7 +146,7 @@ export async function commandConfig(
       printTaskList(tasks);
     }
   } finally {
-    closeDatabase(db);
+    cli.close();
   }
 
   return 0;

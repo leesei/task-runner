@@ -32,9 +32,29 @@ export function bootstrapDataDir(config: DataDirConfig): void {
 
 export type DB = Database;
 
+/**
+ * Apply additive migrations for databases created by an older build.
+ * `CREATE TABLE IF NOT EXISTS` never adds columns, so every new column needs
+ * an explicit, idempotent ALTER.
+ */
+function migrate(db: DB): void {
+  try {
+    db.exec("ALTER TABLE tasks ADD COLUMN entry_point TEXT");
+  } catch {
+    // Column already exists.
+  }
+  try {
+    db.exec("ALTER TABLE control_requests ADD COLUMN claim_tokens TEXT");
+  } catch {
+    // Column already exists.
+  }
+}
+
 export function openDatabase(dbPath: string): DB {
   const db = new Database(dbPath);
+  db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 
@@ -48,11 +68,15 @@ export function configureDatabase(db: DB): void {
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec("PRAGMA cache_size = -64000"); // 64MB cache
 
-  // Migration: add entry_point column to tasks table if missing
-  // IGNORE lets us attempt the ALTER without failing on new databases
-  // that already have the column from the CREATE TABLE.
+  // Older databases need the additive columns; `openDatabase` normally does
+  // this, but configureDatabase is also called directly by tests and tools.
   try {
     db.exec("ALTER TABLE tasks ADD COLUMN entry_point TEXT");
+  } catch {
+    // Column already exists or another non-fatal error — skip
+  }
+  try {
+    db.exec("ALTER TABLE control_requests ADD COLUMN claim_tokens TEXT");
   } catch {
     // Column already exists or another non-fatal error — skip
   }

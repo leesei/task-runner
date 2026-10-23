@@ -63,17 +63,62 @@ export function getTaskById(db: DB, id: string): TaskRow | null {
 
 // ─── Control requests ─────────────────────────────────────────────────────────
 
+export interface ControlToken {
+  instanceId: number;
+  attempt: number;
+}
+
 export function insertControlRequest(
   db: DB,
   kind: ControlRequestKind,
   queueId: string | null,
-  instanceIds: number[] = [],
+  tokens: ControlToken[] = [],
 ): number {
   const result = db.run(
-    "INSERT INTO control_requests (kind, queue_id, instance_ids) VALUES (?, ?, ?)",
-    [kind, queueId, JSON.stringify(instanceIds)],
+    "INSERT INTO control_requests (kind, queue_id, instance_ids, claim_tokens) VALUES (?, ?, ?, ?)",
+    [
+      kind,
+      queueId,
+      JSON.stringify(tokens.map((token) => token.instanceId)),
+      JSON.stringify(tokens),
+    ],
   );
   return Number((result as { lastInsertRowid?: number | bigint }).lastInsertRowid ?? 0);
+}
+
+/**
+ * Read the claim tokens recorded on an abort request. Databases written by an
+ * older build only have instance ids; those are returned with attempt 0 so the
+ * runner can decide how to recover them safely.
+ */
+export function getControlRequestTokens(row: ControlRequestRow): ControlToken[] {
+  if (row.claim_tokens) {
+    try {
+      const parsed = JSON.parse(row.claim_tokens) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter(
+          (token): token is ControlToken =>
+            typeof token === "object" &&
+            token !== null &&
+            typeof (token as ControlToken).instanceId === "number" &&
+            typeof (token as ControlToken).attempt === "number",
+        );
+      }
+    } catch {
+      // Fall through to the legacy column.
+    }
+  }
+
+  if (!row.instance_ids) return [];
+  try {
+    const parsed = JSON.parse(row.instance_ids) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((id): id is number => typeof id === "number")
+      .map((instanceId) => ({ instanceId, attempt: 0 }));
+  } catch {
+    return [];
+  }
 }
 
 export function getControlRequest(db: DB, id: number): ControlRequestRow | null {

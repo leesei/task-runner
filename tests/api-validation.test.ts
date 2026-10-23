@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createApi } from "../src/api/index.ts";
-import { enqueueTask } from "../src/core/service.ts";
+import { createHarness, type TestHarness } from "./support/harness.ts";
 import {
   bootstrapDataDir,
   closeDatabase,
@@ -40,6 +40,7 @@ describe("Seam C: HTTP enqueue validation parity", () => {
   let projectDir: string;
   let db: ReturnType<typeof openDatabase>;
   let api: (req: Request) => Promise<Response>;
+  let harness: TestHarness;
 
   beforeAll(() => {
     dataDir = makeTempDir();
@@ -60,7 +61,8 @@ describe("Seam C: HTTP enqueue validation parity", () => {
       "README.md": "# validated",
     });
     loadAllTasks(db, projectDir, []);
-    api = createApi({ db, dataDir, cwd: projectDir });
+    harness = createHarness(db, dataDir, projectDir);
+    api = createApi({ core: harness.core, events: harness.events, dataDir, cwd: projectDir });
   });
 
   afterAll(() => {
@@ -110,7 +112,7 @@ describe("Seam C: HTTP enqueue validation parity", () => {
 
     let coreIssues: { path: string; message: string }[] = [];
     try {
-      enqueueTask(db, "default:validated", input);
+      harness.core.enqueue("default:validated", input);
     } catch (err: any) {
       coreIssues = err.issues;
     }

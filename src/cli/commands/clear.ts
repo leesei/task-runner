@@ -8,8 +8,8 @@
  * clear --all: deletes all finished instances (refuses if RUNNING)
  */
 
-import { clearQueue } from "../../core/service.ts";
-import { openDatabase, closeDatabase, resolveDataDir } from "../../db/database.ts";
+import { CoreError } from "../../core/service.ts";
+import { openCliCore } from "../core.ts";
 
 export async function commandClear(
   dataDir: string,
@@ -24,31 +24,31 @@ export async function commandClear(
     return 2;
   }
 
-  const dbConfig = resolveDataDir(dataDir);
-  let db;
+  let cli;
   try {
-    db = openDatabase(dbConfig.dbPath);
+    cli = openCliCore(dataDir);
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
   try {
-    const result = clearQueue(db, queueId, all);
-    if (result.success) {
-      console.log(result.message);
-      if (result.deletedCount !== undefined) {
-        console.log(`Deleted ${result.deletedCount} log file(s)`);
-      }
-      return 0;
+    const result = cli.core.clear(queueId, all);
+    console.log(
+      `Cleared ${result.deleted} ${all ? "finished" : "successful"} instance(s) from ${queueId}`,
+    );
+    return 0;
+  } catch (err: any) {
+    if (err instanceof CoreError && err.code === "QUEUE_NOT_FOUND") {
+      console.error(err.message);
+      return 2;
     }
-
-    console.error(result.message);
-    if (result.runningIds && result.runningIds.length > 0) {
-      console.error(`Running instance ids: ${result.runningIds.join(", ")}`);
+    console.error(err.message);
+    if (err instanceof CoreError && err.runningIds?.length) {
+      console.error(`Running instance ids: ${err.runningIds.join(", ")}`);
     }
     return 1;
   } finally {
-    closeDatabase(db);
+    cli.close();
   }
 }
