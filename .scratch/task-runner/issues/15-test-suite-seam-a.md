@@ -4,7 +4,7 @@
 
 Fixture tasks needed at this seam: a success task, an explicit-failure task, a throwing task, a slow task that honors the abort signal, a noisy task writing to both streams, an echo task that prints its input, a task with no schema, and a task whose manifest is invalid or conflicting. The slow task is what makes concurrency and stop/abort deterministic.
 
-**Blocked by:** 11
+**Blocked by:** 09, 11, 12, 13, 14, 18
 
 **Status:** ready-for-agent
 

@@ -4,7 +4,7 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] `tasks/ls/` is a valid task definition: `index.ts` (default export), `README.md`, `settings.json`, `schema.json`
 - [ ] `tasks/cat/` is a valid task definition with redaction rules preserved

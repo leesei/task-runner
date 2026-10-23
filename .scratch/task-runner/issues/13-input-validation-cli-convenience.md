@@ -2,9 +2,9 @@
 
 **What to build:** The input contract fully wired in core and used by both CLI and HTTP: the context is JSON validated against the task schema at enqueue time, with `INPUT_SCHEMA_VIOLATION` and field issues on failure. CLI context sources are escaped JSON, `@file`, `name=value` (string), and `name:=value` (JSON value), plus the existing bare-string conveniences. String properties marked `"format": "path"` are resolved by the CLI against the invocation directory before validation and stored absolute. Namespaced task ids, project-first precedence, and clear errors for unknown task ids, malformed JSON, and schema violations are covered. This ticket also covers the `install` command's namespace registration.
 
-**Blocked by:** 10
+**Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] Context validated against JSON Schema subset at enqueue time: `type`, `properties`, `required`, `enum`, `minimum`, `maximum`, `default`, `description`, `format`
 - [ ] Unknown JSON Schema keywords are ignored

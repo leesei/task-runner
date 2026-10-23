@@ -16,5 +16,5 @@
 - [ ] `env` filter and values parameters work correctly
 - [ ] Assertions from `tasks/test-cases/run-all.ts` migrated into the real test suite where they belong
 - [ ] `tasks/test-cases/` fixtures left in place
-- [ ] All 17 tickets resolved
+- [ ] All tickets resolved
 - [ ] Implementer subagent worktrees cleaned up
