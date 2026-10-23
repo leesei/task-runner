@@ -3,7 +3,15 @@
  */
 
 import type { DB } from "./database.ts";
-import type { TaskRow, QueueRow, InstanceRow, QueueState, InstanceState } from "./schema.ts";
+import type {
+  TaskRow,
+  QueueRow,
+  InstanceRow,
+  QueueState,
+  InstanceState,
+  ControlRequestKind,
+  ControlRequestRow,
+} from "./schema.ts";
 
 // ─── Tasks ─────────────────────────────────────────────────────────────────────
 
@@ -47,6 +55,51 @@ export function getTasksWithWarnings(db: DB): TaskRow[] {
   return db.query<TaskRow, []>(
     "SELECT * FROM tasks WHERE manifest_warnings IS NOT NULL AND manifest_warnings != '' ORDER BY namespace, id",
   ).all();
+}
+
+export function getTaskById(db: DB, id: string): TaskRow | null {
+  return getTask(db, id);
+}
+
+// ─── Control requests ─────────────────────────────────────────────────────────
+
+export function insertControlRequest(
+  db: DB,
+  kind: ControlRequestKind,
+  queueId: string | null,
+  instanceIds: number[] = [],
+): number {
+  const result = db.run(
+    "INSERT INTO control_requests (kind, queue_id, instance_ids) VALUES (?, ?, ?)",
+    [kind, queueId, JSON.stringify(instanceIds)],
+  );
+  return Number((result as { lastInsertRowid?: number | bigint }).lastInsertRowid ?? 0);
+}
+
+export function getControlRequest(db: DB, id: number): ControlRequestRow | null {
+  const row = db.query<ControlRequestRow, [number]>(
+    "SELECT * FROM control_requests WHERE id = ?",
+  ).get(id);
+  return row ?? null;
+}
+
+export function getPendingControlRequests(
+  db: DB,
+  kind?: ControlRequestKind,
+): ControlRequestRow[] {
+  const sql = kind
+    ? "SELECT * FROM control_requests WHERE consumed_at IS NULL AND kind = ? ORDER BY id"
+    : "SELECT * FROM control_requests WHERE consumed_at IS NULL ORDER BY id";
+  return (kind
+    ? db.query<ControlRequestRow, [ControlRequestKind]>(sql).all(kind)
+    : db.query<ControlRequestRow, []>(sql).all()) as ControlRequestRow[];
+}
+
+export function markControlRequestConsumed(db: DB, id: number): void {
+  db.run(
+    "UPDATE control_requests SET consumed_at = datetime('now') WHERE id = ? AND consumed_at IS NULL",
+    [id],
+  );
 }
 
 // ─── Queues ────────────────────────────────────────────────────────────────────

@@ -52,10 +52,21 @@ CREATE TABLE IF NOT EXISTS instances (
   duration_ms INTEGER
 );
 
+-- Durable cross-process requests consumed by the daemon runner
+CREATE TABLE IF NOT EXISTS control_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,            -- abort, reload
+  queue_id TEXT,
+  instance_ids TEXT,             -- JSON array for abort requests
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  consumed_at TEXT
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_instances_task_id ON instances(task_id);
 CREATE INDEX IF NOT EXISTS idx_instances_state ON instances(state);
 CREATE INDEX IF NOT EXISTS idx_instances_created_at ON instances(created_at);
+CREATE INDEX IF NOT EXISTS idx_control_requests_pending ON control_requests(consumed_at, id);
 `;
 
 export type QueueState = 'IDLE' | 'PROCESSING' | 'STOPPED';
@@ -98,4 +109,15 @@ export interface InstanceRow {
   ended_at: string | null;
   log_path: string | null;
   duration_ms: number | null;
+}
+
+export type ControlRequestKind = "abort" | "reload";
+
+export interface ControlRequestRow {
+  id: number;
+  kind: ControlRequestKind;
+  queue_id: string | null;
+  instance_ids: string | null;
+  created_at: string;
+  consumed_at: string | null;
 }

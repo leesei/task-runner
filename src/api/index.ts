@@ -22,25 +22,21 @@
  */
 
 import type { DB } from "../db/database.ts";
-import {
-  getAllQueues,
-  getQueue,
-  getQueueCounts,
-  getAllTasks,
-  getTask,
-  getInstancesByQueue,
-  getInstance,
-  insertInstance,
-} from "../db/queries.ts";
+import { getInstance, getInstancesByQueue, getQueue } from "../db/queries.ts";
 import { readLogFile } from "../db/logs.ts";
-import { controlStart, controlStop, controlAbort } from "../control/queue-control.ts";
-import { loadAllTasks } from "../tasks/discovery.ts";
-import { getPackageLocations } from "../tasks/lockfile.ts";
-import { ensureQueuesForTasks } from "../runner/queue-state.ts";
 import {
-  deleteSuccessInstances,
-  deleteFinishedInstances,
-} from "../db/queries.ts";
+  abortQueue,
+  clearQueue,
+  CoreError,
+  enqueueTask,
+  getQueueSummary,
+  listQueues,
+  listTasks,
+  readInstanceLog,
+  reloadTasks,
+  startQueue,
+  stopQueue,
+} from "../core/service.ts";
 import type { QueueState, InstanceState } from "../db/schema.ts";
 
 // ─── Structured errors ──────────────────────────────────────────────────────────
@@ -127,42 +123,19 @@ export function createApi(h: ApiHandlers) {
   // ─── Queues ──────────────────────────────────────────────────────────────────
 
   function handleQueues(): Response {
-    const queues = getAllQueues(db);
-    const body = queues.map(q => {
-      const counts = getQueueCounts(db, q.id);
-      return {
-        id: q.id,
-        state: q.state,
-        concurrency: q.concurrency,
-        running: counts.running,
-        pending: counts.pending,
-        succeeded: counts.succeeded,
-        failed: counts.failed,
-      };
-    });
-    return new Response(JSON.stringify(body), {
+    return new Response(JSON.stringify(listQueues(db)), {
       headers: { "Content-Type": "application/json" },
     });
   }
 
   function handleQueueDetail(queueId: string): Response {
-    const queue = getQueue(db, queueId);
+    const queue = getQueueSummary(db, queueId);
     if (!queue) {
       return jsonError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`, 404);
     }
-    const counts = getQueueCounts(db, queueId);
-    return new Response(
-      JSON.stringify({
-        id: queue.id,
-        state: queue.state,
-        concurrency: queue.concurrency,
-        running: counts.running,
-        pending: counts.pending,
-        succeeded: counts.succeeded,
-        failed: counts.failed,
-      }),
-      { headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify(queue), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   function handleQueueInstances(queueId: string, stateFilter?: string): Response {
@@ -206,7 +179,7 @@ export function createApi(h: ApiHandlers) {
   // ─── Queue control ───────────────────────────────────────────────────────────
 
   function handleStartQueue(queueId: string): Response {
-    const result = controlStart(db, queueId);
+    const result = startQueue(db, queueId);
     if (!result.success) {
       if (result.message.includes("not found")) {
         return jsonError("QUEUE_NOT_FOUND", result.message, 404);
@@ -221,7 +194,7 @@ export function createApi(h: ApiHandlers) {
   }
 
   function handleStopQueue(queueId: string): Response {
-    const result = controlStop(db, queueId);
+    const result = stopQueue(db, queueId);
     if (!result.success) {
       if (result.message.includes("not found")) {
         return jsonError("QUEUE_NOT_FOUND", result.message, 404);
@@ -235,11 +208,14 @@ export function createApi(h: ApiHandlers) {
     );
   }
 
-  function handleAbortQueue(queueId: string): Response {
-    const result = controlAbort(db, queueId);
+  async function handleAbortQueue(queueId: string): Promise<Response> {
+    const result = await abortQueue(db, queueId);
     if (!result.success) {
       if (result.message.includes("not found")) {
         return jsonError("QUEUE_NOT_FOUND", result.message, 404);
+      }
+      if (result.message.includes("Timed out")) {
+        return jsonError("CONTROL_TIMEOUT", result.message, 504);
       }
       return jsonError("INVALID_TRANSITION", result.message, 409);
     }
@@ -261,41 +237,26 @@ export function createApi(h: ApiHandlers) {
   // ─── Tasks ───────────────────────────────────────────────────────────────────
 
   function handleTasks(): Response {
-    const tasks = getAllTasks(db);
-    return new Response(
-      JSON.stringify(
-        tasks.map(t => ({
-          id: t.id,
-          name: t.name,
-          description: t.description,
-          category: t.category,
-          concurrency: t.concurrency,
-          timeout_ms: t.timeout_ms,
-          has_schema: t.input_schema !== null,
-        })),
-      ),
-      { headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify(listTasks(db)), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   // ─── Instances ───────────────────────────────────────────────────────────────
 
   function handleEnqueueInstance(body: { task: string; input: unknown }): Response {
-    const task = getTask(db, body.task);
-    if (!task) {
-      return jsonError("TASK_NOT_FOUND", `Task not found: ${body.task}`, 404);
+    try {
+      const id = enqueueTask(db, body.task, body.input);
+      return new Response(
+        JSON.stringify({ id, task: body.task, input: body.input }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    } catch (err) {
+      if (err instanceof CoreError && err.code === "TASK_NOT_FOUND") {
+        return jsonError(err.code, err.message, 404);
+      }
+      throw err;
     }
-
-    const inputJson = JSON.stringify(body.input);
-    const id = insertInstance(db, body.task, inputJson, null);
-
-    // Ensure queue exists for this task
-    ensureQueuesForTasks(db);
-
-    return new Response(
-      JSON.stringify({ id, task: body.task, input: body.input }),
-      { headers: { "Content-Type": "application/json" } },
-    );
   }
 
   function handleInstanceDetail(instanceId: number): Response {
@@ -322,28 +283,19 @@ export function createApi(h: ApiHandlers) {
   }
 
   function handleInstanceLog(instanceId: number): Response {
-    const instance = getInstance(db, instanceId);
-    if (!instance) {
+    const log = readInstanceLog(db, instanceId);
+    if (!log) {
       return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
     }
-    if (!instance.log_path) {
-      return new Response(JSON.stringify([]), {
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    const records = readLogFile(instance.log_path);
-    return new Response(
-      JSON.stringify(records.map(r => ({ ...r, text: r.text }))),
-      { headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify(log.records), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   // ─── Reload ──────────────────────────────────────────────────────────────────
 
   function handleReload(): Response {
-    const packageLocations = getPackageLocations(dataDir);
-    const { loaded, warnings } = loadAllTasks(db, cwd, packageLocations);
-    ensureQueuesForTasks(db);
+    const { loaded, warnings } = reloadTasks(db, cwd, dataDir);
     return new Response(
       JSON.stringify({ reloaded: loaded, warnings }),
       { headers: { "Content-Type": "application/json" } },
@@ -351,31 +303,23 @@ export function createApi(h: ApiHandlers) {
   }
 
   function handleClearQueue(queueId: string, all: boolean): Response {
-    const queue = getQueue(db, queueId);
-    if (!queue) {
-      return jsonError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`, 404);
-    }
-    if (all) {
-      const result = deleteFinishedInstances(db, queueId);
-      if (result.running_ids.length > 0) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            code: "CLEAR_REFUSED_RUNNING",
-            message: `Cannot clear --all: ${result.running_ids.length} instance(s) are RUNNING: ${result.running_ids.join(", ")}`,
-            runningIds: result.running_ids,
-          }),
-          { status: 409, headers: { "Content-Type": "application/json" } },
-        );
+    const result = clearQueue(db, queueId, all);
+    if (!result.success) {
+      if (result.message.includes("not found")) {
+        return jsonError("QUEUE_NOT_FOUND", result.message, 404);
       }
       return new Response(
-        JSON.stringify({ success: true, deleted: result.deleted, queueId }),
-        { headers: { "Content-Type": "application/json" } },
+        JSON.stringify({
+          success: false,
+          code: "CLEAR_REFUSED_RUNNING",
+          message: result.message,
+          runningIds: result.runningIds ?? [],
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
       );
     }
-    const deleted = deleteSuccessInstances(db, queueId);
     return new Response(
-      JSON.stringify({ success: true, deleted, queueId }),
+      JSON.stringify({ success: true, deleted: result.deletedCount ?? 0, queueId }),
       { headers: { "Content-Type": "application/json" } },
     );
   }
@@ -443,7 +387,7 @@ export function createApi(h: ApiHandlers) {
         }
 
         if (subPath === "/abort") {
-          return req.method === "POST" ? handleAbortQueue(queueId) : jsonError("METHOD_NOT_ALLOWED", "Only POST allowed", 405);
+          return req.method === "POST" ? await handleAbortQueue(queueId) : jsonError("METHOD_NOT_ALLOWED", "Only POST allowed", 405);
         }
 
         return jsonError("NOT_FOUND", `Unknown queue sub-resource: ${subPath}`, 404);

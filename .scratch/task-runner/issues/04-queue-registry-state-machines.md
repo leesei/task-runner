@@ -4,7 +4,7 @@
 
 **Blocked by:** 03
 
-**Status:** resolved
+**Status:** done
 
 - [ ] Each registered task creates a queue row with queue id = task id, state = IDLE, concurrency from manifest
 - [ ] Queue state machine: IDLE ⇄ PROCESSING; PROCESSING → STOPPED (stop/abort); STOPPED → PROCESSING (start); PROCESSING → IDLE (drained)

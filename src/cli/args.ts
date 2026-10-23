@@ -2,7 +2,7 @@
  * CLI argument parsing for `tq`.
  *
  * Supports:
- * - Subcommands: daemon, add, start, stop, abort, clear, status, logs, install, reload
+ * - Subcommands: daemon, add, start, stop, abort, clear, status, config, logs, install, reload
  * - Global flags: --data-dir, --port, --help
  * - Per-command flags (daemon: --data-dir, --port)
  *
@@ -26,7 +26,8 @@ export function parseArgs(args: string[]): ParsedArgs {
   // When run via bun run, argv is [bun, script.ts, ...args] → skip 1.
   // Heuristic: skip 1, then if the next arg looks like a program path, skip it too.
   if (args.length > i) i++;
-  if (args.length > i && (args[i]!.includes("/") || args[i]!.includes("\\"))) i++;
+  if (args.length > i && (args[i]!.includes("/") || args[i]!.includes("\\")))
+    i++;
 
   while (i < args.length) {
     const arg = args[i]!;
@@ -97,6 +98,7 @@ export function printUsage(): void {
 tq — Task Runner CLI
 
 Usage:
+  tq                         Show this help
   tq daemon                  Start the daemon
   tq add <task> [context]    Enqueue a task instance
   tq start <queue>           Start draining a queue
@@ -104,14 +106,21 @@ Usage:
   tq abort <queue>           Abort running instances
   tq clear [--all] <queue>   Clear finished instances
   tq status                  Show queue status
+  tq config [--tasks]        Show current config (--tasks: full task config)
   tq logs <instance-id>      Show instance logs
   tq install <package>       Install a task package
   tq reload                  Reload task definitions
 
 Global flags:
-  --data-dir <path>   Data directory (default: .tq/, or TQ_DATA_DIR)
+  --data-dir <path>   Data directory (default: <project>/.task-runner, or TQ_DATA_DIR)
   --port <port>       HTTP port (default: 3000, or TQ_PORT)
   --help, -h          Show this help
+
+Config flags:
+  --tasks             Dump the full config of every registered task
+
+The project is found from the current directory or, when run from elsewhere,
+from the location of the tq binary, so commands work from any directory.
 
 Environment variables:
   TQ_DATA_DIR   Data directory path
@@ -129,7 +138,7 @@ Usage:
   tq daemon [--data-dir <path>] [--port <port>]
 
 Flags:
-  --data-dir <path>   Data directory (default: .tq/ in cwd, or TQ_DATA_DIR)
+  --data-dir <path>   Data directory (default: <project>/.task-runner, or TQ_DATA_DIR)
   --port <port>       HTTP port (default: 3000, or TQ_PORT). Use 0 for ephemeral.
   --help, -h          Show this help
 
@@ -137,7 +146,7 @@ The daemon writes a descriptor file (daemon.json) in the data directory with
 its pid, port, and start time. Other tq commands use this to find the daemon.
 
 Examples:
-  tq daemon                          # default: localhost:3000, .tq/
+  tq daemon                          # default: localhost:3000, .task-runner/
   tq daemon --port 0                 # ephemeral port (for tests)
   tq daemon --data-dir /tmp/tq       # custom data directory
   TQ_PORT=8080 tq daemon             # via environment variable

@@ -4,7 +4,7 @@
 
 **Blocked by:** 06
 
-**Status:** resolved
+**Status:** done
 
 - [x] Instance state machine: PENDING → RUNNING → SUCCESS; PENDING → RUNNING → FAILED; RUNNING → abort → PENDING
 - [x] Per-instance timeout defaults to 30 minutes, configurable per task in manifest (`timeoutMs`)

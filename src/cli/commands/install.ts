@@ -1,21 +1,24 @@
 /**
  * `tq install <package>` command.
  *
- * Installs a task package with Bun, records it in the lockfile, and
- * triggers a reload if a daemon is reachable.
- * Works offline: updates the package and lockfile; reload requires daemon.
+ * Installs a task package with Bun, records it in the lockfile, and asks a live
+ * daemon to reload through a durable control request. It never calls the daemon
+ * HTTP API.
  */
 
-import { addPackage, getLockfilePath } from "../../tasks/lockfile.ts";
-import { resolveDataDir, bootstrapDataDir } from "../../db/database.ts";
-import { loadAllTasks } from "../../tasks/discovery.ts";
-import { getPackageLocations } from "../../tasks/lockfile.ts";
-import { ensureQueuesForTasks } from "../../runner/queue-state.ts";
-import { openDatabase, closeDatabase } from "../../db/database.ts";
+import { addPackage, getLockfilePath, readLockfile } from "../../tasks/lockfile.ts";
+import {
+  bootstrapDataDir,
+  closeDatabase,
+  openDatabase,
+  resolveDataDir,
+} from "../../db/database.ts";
+import { reloadTasks, requestReload } from "../../core/service.ts";
 
 export async function commandInstall(
   dataDir: string,
-  daemonPort: number | null,
+  daemonRunning: boolean,
+  projectRoot: string,
   args: string[],
   _flags: Record<string, string | true>,
 ): Promise<number> {
@@ -70,9 +73,6 @@ export async function commandInstall(
   }
 
   const lockfilePath = getLockfilePath(dataDir);
-  // Read existing lockfile to check for conflicts
-  const existingLockfilePath = lockfilePath;
-  const { readLockfile } = await import("../../tasks/lockfile.ts");
   const existing = readLockfile(dataDir);
 
   // Check namespace collision with default
@@ -89,32 +89,33 @@ export async function commandInstall(
 
   addPackage(dataDir, packageName, "1.0.0", tasksDir, namespace);
   console.log(`Installed ${packageName} (namespace: ${namespace})`);
+  console.log(`Lockfile: ${lockfilePath}`);
 
-  // If daemon is reachable, reload to pick up new tasks
-  if (daemonPort !== null) {
-    try {
-      const res = await fetch(
-        `http://localhost:${daemonPort}/api/reload`,
-        { method: "POST" },
-      );
-      if (res.ok) {
-        const body = (await res.json()) as { reloaded: number; warnings: string[] };
-        console.log(`Reloaded ${body.reloaded} task(s)`);
-        if (body.warnings.length > 0) {
-          for (const w of body.warnings) {
-            console.warn(`Warning: ${w}`);
-          }
-        }
-      } else {
-        console.warn("Daemon reload failed; tasks will be picked up on next start");
-      }
-    } catch {
-      console.warn("Daemon not reachable; tasks will be picked up on next start");
-    }
-  } else {
+  if (!daemonRunning) {
     console.log("No daemon running; tasks will be available when the daemon starts");
+    return 0;
   }
 
-  return 0;
-}
+  let db;
+  try {
+    db = openDatabase(dbConfig.dbPath);
+  } catch (err: any) {
+    console.error(`Error opening database: ${err.message}`);
+    return 1;
+  }
 
+  try {
+    const { loaded, warnings } = reloadTasks(db, projectRoot, dataDir);
+    console.log(`Reloaded ${loaded} task(s)`);
+    for (const warning of warnings) {
+      console.warn(`Warning: ${warning}`);
+    }
+    if (!(await requestReload(db))) {
+      console.error("Error: daemon did not process the reload request in time");
+      return 1;
+    }
+    return 0;
+  } finally {
+    closeDatabase(db);
+  }
+}

@@ -5,9 +5,8 @@
  * Serves the REST API and dashboard via Bun.serve.
  */
 import { resolveDataDir, openDatabase, closeDatabase, bootstrapDataDir, configureDatabase } from "../../db/database.ts";
-import { loadAllTasks } from "../../tasks/discovery.ts";
-import { getPackageLocations } from "../../tasks/lockfile.ts";
-import { autostartQueuesOnBoot, ensureQueuesForTasks } from "../../runner/queue-state.ts";
+import { reloadTasks } from "../../core/service.ts";
+import { autostartQueuesOnBoot } from "../../runner/queue-state.ts";
 import { createRunner } from "../../runner/runner.ts";
 import { installConsoleInterception } from "../../runner/execution.ts";
 import { createApi } from "../../api/index.ts";
@@ -16,6 +15,7 @@ export async function commandDaemon(
   dataDir: string,
   port: number,
   flags: Record<string, string | true>,
+  projectRoot: string = process.cwd(),
 ): Promise<number> {
   const fs = require("node:fs");
 
@@ -38,17 +38,14 @@ export async function commandDaemon(
     return 1;
   }
 
-  // Discover and load tasks
-  const cwd = process.cwd();
-  const packageLocations = getPackageLocations(dataDir);
-  const { loaded, warnings } = loadAllTasks(db, cwd, packageLocations);
+  // Discover and load tasks from the project root, not the process cwd:
+  // the CLI may have been started from a different directory.
+  const cwd = projectRoot;
+  const { loaded, warnings } = reloadTasks(db, cwd, dataDir);
   console.log(`Loaded ${loaded} task(s)`);
   for (const warning of warnings) {
     console.warn(`Warning: ${warning}`);
   }
-
-  // Ensure queues exist for all tasks
-  ensureQueuesForTasks(db);
 
   // Autostart queues (STOPPED stay STOPPED, others enter PROCESSING)
   const { started, stayedStopped } = autostartQueuesOnBoot(db);
@@ -61,7 +58,16 @@ export async function commandDaemon(
   const apiRouter = createApi({ db, dataDir, cwd });
 
   // Start the runner loop
-  const runner = createRunner({ dataDir });
+  const runner = createRunner({
+    dataDir,
+    onReload: () => {
+      const result = reloadTasks(db, projectRoot, dataDir);
+      console.log(`Reloaded ${result.loaded} task(s)`);
+      for (const warning of result.warnings) {
+        console.warn(`Warning: ${warning}`);
+      }
+    },
+  });
   console.log("Runner loop started");
 
   // Run runner in background

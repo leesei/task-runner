@@ -1,13 +1,12 @@
 /**
  * `tq logs <instance-id>` command.
  *
- * Shows instance logs. When daemon is reachable, fetches from HTTP API.
- * Otherwise reads the log file directly from the data directory.
+ * Reads the instance log through the shared core. It never calls the daemon
+ * HTTP API, so it works with the daemon stopped.
  */
 
-import { resolveDataDir, openDatabase, closeDatabase } from "../../db/database.ts";
-import { getInstance } from "../../db/queries.ts";
-import { readLogFile } from "../../db/logs.ts";
+import { closeDatabase, openDatabase, resolveDataDir } from "../../db/database.ts";
+import { readInstanceLog } from "../../core/service.ts";
 
 function printRecords(records: { timestamp: string; stream: string; text: string }[]): void {
   if (records.length === 0) {
@@ -22,7 +21,6 @@ function printRecords(records: { timestamp: string; stream: string; text: string
 
 export async function commandLogs(
   dataDir: string,
-  daemonPort: number | null,
   args: string[],
   _flags: Record<string, string | true>,
 ): Promise<number> {
@@ -37,27 +35,6 @@ export async function commandLogs(
     return 2;
   }
 
-  // If daemon is reachable, fetch logs from API
-  if (daemonPort !== null) {
-    try {
-      const res = await fetch(
-        `http://localhost:${daemonPort}/api/instances/${instanceId}/log`,
-      );
-      if (res.ok) {
-        const records = (await res.json()) as { timestamp: string; stream: string; text: string }[];
-        console.log(`Logs for instance ${instanceId}:`);
-        printRecords(records);
-        return 0;
-      }
-      const errBody = await res.text();
-      console.error(`Daemon returned ${res.status}: ${errBody}`);
-      return 1;
-    } catch {
-      // Fall through to offline path
-    }
-  }
-
-  // Offline path: read log file directly
   const dbConfig = resolveDataDir(dataDir);
   let db;
   try {
@@ -68,21 +45,19 @@ export async function commandLogs(
   }
 
   try {
-    const instance = getInstance(db, instanceId);
-    if (!instance) {
+    const log = readInstanceLog(db, instanceId);
+    if (!log) {
       console.error(`Instance not found: ${instanceId}`);
       return 2;
     }
 
-    if (!instance.log_path) {
-      console.log(`Logs for instance ${instanceId}:`);
+    console.log(`Logs for instance ${instanceId}:`);
+    if (!log.instance.log_path) {
       console.log("(no logs — instance has no log file)");
       return 0;
     }
 
-    const records = readLogFile(instance.log_path);
-    console.log(`Logs for instance ${instanceId}:`);
-    printRecords(records);
+    printRecords(log.records);
     return 0;
   } catch (err: any) {
     console.error(`Error: ${err.message}`);

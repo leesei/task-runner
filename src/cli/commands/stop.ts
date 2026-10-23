@@ -1,41 +1,47 @@
 /**
  * `tq stop <queue>` command.
  *
- * Stops a queue: no new instances launched, running instances finish.
- * Requires a running daemon (uses HTTP API).
+ * Calls the shared core to stop launching new instances. The daemon must be
+ * live; liveness comes from the descriptor pid, never HTTP.
  */
 
+import { stopQueue } from "../../core/service.ts";
+import { closeDatabase, openDatabase, resolveDataDir } from "../../db/database.ts";
+
 export async function commandStop(
-  daemonPort: number | null,
+  dataDir: string,
+  daemonRunning: boolean,
   queueId: string | undefined,
   _flags: Record<string, string | true>,
-  _dataDir: string,
 ): Promise<number> {
   if (!queueId) {
     console.error("Usage: tq stop <queue>");
     return 2;
   }
 
-  if (daemonPort === null) {
+  if (!daemonRunning) {
     console.error("Error: daemon is not running. Start it with `tq daemon` first.");
     return 1;
   }
 
+  const dbConfig = resolveDataDir(dataDir);
+  let db;
   try {
-    const res = await fetch(
-      `http://localhost:${daemonPort}/api/queues/${encodeURIComponent(queueId)}/stop`,
-      { method: "POST" },
-    );
-    if (res.ok) {
-      const body = (await res.json()) as { success: boolean; message: string; state: string };
-      console.log(body.message);
-      return 0;
-    }
-    const errBody = await res.text();
-    console.error(`Daemon returned ${res.status}: ${errBody}`);
-    return 1;
+    db = openDatabase(dbConfig.dbPath);
   } catch (err: any) {
-    console.error(`Error: ${err.message}`);
+    console.error(`Error opening database: ${err.message}`);
     return 1;
+  }
+
+  try {
+    const result = stopQueue(db, queueId);
+    if (!result.success) {
+      console.error(result.message);
+      return 1;
+    }
+    console.log(result.message);
+    return 0;
+  } finally {
+    closeDatabase(db);
   }
 }

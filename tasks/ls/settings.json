@@ -6,8 +6,12 @@
   "concurrency": 4,
   "inputSchema": "schema.json",
   "env": {},
+  "category": "fs",
   "agents": {
     "daemon": { "logPath": "../logs" },
-    "cli": { "argumentHint": "<directory>", "example": "tq add default:ls fixture/1" }
+    "cli": {
+      "argumentHint": "<directory>",
+      "example": "tq add default:ls fixture/1"
+    }
   }
 }

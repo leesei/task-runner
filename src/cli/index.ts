@@ -1,28 +1,37 @@
 /**
  * `tq` CLI entry point.
  *
- * Routes subcommands to their handlers. When the daemon is reachable, mutations
- * go through the HTTP API. When not, offline-capable commands operate directly
- * on SQLite.
+ * Routes subcommands to their handlers. Every command calls the shared core
+ * in-process; the CLI never calls the daemon HTTP API. Daemon liveness is
+ * checked from the descriptor pid.
  */
 
-import { parseArgs, printUsage, printDaemonUsage, getStringFlag } from "./args.ts";
-import { commandDaemon } from "./commands/daemon.ts";
-import { commandAdd } from "./commands/add.ts";
-import { commandStart } from "./commands/start.ts";
-import { commandStop } from "./commands/stop.ts";
+import {
+  getStringFlag,
+  parseArgs,
+  printDaemonUsage,
+  printUsage,
+} from "./args.ts";
 import { commandAbort } from "./commands/abort.ts";
+import { commandAdd } from "./commands/add.ts";
 import { commandClear } from "./commands/clear.ts";
-import { commandStatus } from "./commands/status.ts";
-import { commandLogs } from "./commands/logs.ts";
+import { commandConfig } from "./commands/config.ts";
+import { commandDaemon } from "./commands/daemon.ts";
 import { commandInstall } from "./commands/install.ts";
+import { commandLogs } from "./commands/logs.ts";
 import { commandReload } from "./commands/reload.ts";
+import { commandStart } from "./commands/start.ts";
+import { commandStatus } from "./commands/status.ts";
+import { commandStop } from "./commands/stop.ts";
+import { resolveCliDataDir } from "./data-dir.ts";
 
-function findDaemonDescriptor(dataDir: string): { port: number; pid: number } | null {
+function findDaemonDescriptor(
+  dataDir: string,
+): { port: number; pid: number } | null {
   try {
     const path = `${dataDir}/daemon.json`;
     // Synchronously read for CLI use
-    const raw =require("node:fs").readFileSync(path, "utf-8");
+    const raw = require("node:fs").readFileSync(path, "utf-8");
     if (!raw) return null;
     return JSON.parse(raw) as { port: number; pid: number };
   } catch {
@@ -30,26 +39,26 @@ function findDaemonDescriptor(dataDir: string): { port: number; pid: number } | 
   }
 }
 
-async function probeDaemon(port: number): Promise<boolean> {
+/**
+ * The CLI only needs to know whether a daemon owns this data directory. It
+ * checks the descriptor pid instead of probing the daemon's HTTP API.
+ */
+function findLiveDaemon(dataDir: string): { port: number; pid: number } | null {
+  const descriptor = findDaemonDescriptor(dataDir);
+  if (!descriptor) return null;
+
   try {
-    const res = await Bun.fetch(`http://localhost:${port}/api/health`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    return res.ok;
+    process.kill(descriptor.pid, 0);
+    return descriptor;
   } catch {
-    return false;
+    return null;
   }
 }
 
 export async function main(args: string[]): Promise<number> {
   const parsed = parseArgs(args);
 
-  const dataDir = getStringFlag(
-    parsed.flags,
-    "data-dir",
-    "TQ_DATA_DIR",
-    ".tq",
-  );
+  const { dataDir, projectRoot } = resolveCliDataDir(parsed.flags, args[1]);
 
   const cmd = parsed.positional[0];
 
@@ -63,44 +72,84 @@ export async function main(args: string[]): Promise<number> {
     return 0;
   }
 
-  if (!cmd || cmd === "daemon") {
+  // Running `tq` bare shows help; the daemon requires the explicit subcommand.
+  if (!cmd) {
+    printUsage();
+    return 0;
+  }
+
+  if (cmd === "daemon") {
     const port = parseInt(
       getStringFlag(parsed.flags, "port", "TQ_PORT", "3000"),
       10,
     );
-    return await commandDaemon(dataDir, port, parsed.flags);
+    return await commandDaemon(dataDir, port, parsed.flags, projectRoot);
   }
 
-  // Discover daemon
-  const descriptor = findDaemonDescriptor(dataDir);
-  let daemonPort = descriptor?.port ?? null;
-  if (daemonPort !== null && !(await probeDaemon(daemonPort))) {
-    daemonPort = null;
-  }
+  // Discover a live daemon from the descriptor pid. No HTTP probe is made.
+  const descriptor = findLiveDaemon(dataDir);
+  const daemonRunning = descriptor !== null;
+  const daemonPort = descriptor?.port ?? null;
 
   switch (cmd) {
     case "add":
-      return await commandAdd(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
+      return await commandAdd(
+        dataDir,
+        parsed.positional.slice(1),
+        parsed.flags,
+      );
     case "start":
-      return await commandStart(daemonPort, parsed.positional[1], parsed.flags, dataDir);
+      return await commandStart(
+        dataDir,
+        daemonRunning,
+        parsed.positional[1],
+        parsed.flags,
+      );
     case "stop":
-      return await commandStop(daemonPort, parsed.positional[1], parsed.flags, dataDir);
+      return await commandStop(
+        dataDir,
+        daemonRunning,
+        parsed.positional[1],
+        parsed.flags,
+      );
     case "abort":
-      return await commandAbort(daemonPort, parsed.positional[1], parsed.flags, dataDir);
+      return await commandAbort(
+        dataDir,
+        daemonRunning,
+        parsed.positional[1],
+        parsed.flags,
+      );
     case "clear":
-      return await commandClear(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
+      return await commandClear(
+        dataDir,
+        parsed.positional.slice(1),
+        parsed.flags,
+      );
     case "status":
-      return await commandStatus(dataDir, daemonPort, parsed.flags);
+      return await commandStatus(dataDir, parsed.flags);
+    case "config":
+      return await commandConfig(dataDir, daemonPort, parsed.flags, projectRoot);
     case "logs":
-      return await commandLogs(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
+      return await commandLogs(
+        dataDir,
+        parsed.positional.slice(1),
+        parsed.flags,
+      );
     case "install":
-      return await commandInstall(dataDir, daemonPort, parsed.positional.slice(1), parsed.flags);
+      return await commandInstall(
+        dataDir,
+        daemonRunning,
+        projectRoot,
+        parsed.positional.slice(1),
+        parsed.flags,
+      );
     case "reload":
-      if (daemonPort === null) {
-        console.error("Error: daemon is not running. Start it with `tq daemon` first.");
-        return 1;
-      }
-      return await commandReload(daemonPort, parsed.flags);
+      return await commandReload(
+        dataDir,
+        daemonRunning,
+        projectRoot,
+        parsed.flags,
+      );
     default:
       console.error(`Unknown command: ${cmd}`);
       printUsage();
