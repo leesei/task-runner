@@ -4,6 +4,7 @@
   "name": "SHA-256 hash",
   "description": "Compute the SHA-256 digest of a file",
   "concurrency": 2,
+  "timeoutMs": 1800000,
   "inputSchema": "schema.json",
   "env": {},
   "category": "fs",

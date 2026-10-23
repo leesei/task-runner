@@ -18,6 +18,13 @@ tq add default:minfo '{"filepath":"fixture/1/1.srt"}'
 ## Settings
 
 - Concurrency: 1 (media analysis is typically CPU-bound; run one at a time)
+- Category: media
+- Timeout: 30 minutes (`timeoutMs: 1800000`)
+
+## Requirements
+
+Requires the `mediainfo` CLI on `PATH`. If it is missing, the task fails with a clear
+`mediainfo CLI not found` message instead of a generic exit code.
 
 ## Entrypoint
 

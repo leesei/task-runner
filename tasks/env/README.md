@@ -27,3 +27,4 @@ tq add default:env '{"filter":"TASKRUNNER","values":false}'
 
 - Concurrency: 8
 - Category: text
+- Timeout: 30 minutes (`timeoutMs: 1800000`)

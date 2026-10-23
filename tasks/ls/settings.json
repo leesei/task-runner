@@ -4,6 +4,7 @@
   "name": "List directory",
   "description": "List the contents of a directory",
   "concurrency": 4,
+  "timeoutMs": 1800000,
   "inputSchema": "schema.json",
   "env": {},
   "category": "fs",
