@@ -38,8 +38,9 @@ export async function commandInstall(
 
   // Locate the installed package's tasks directory
   // Bun installs to node_modules; look for a tasks/ subdirectory
-  const nodeModules = `node_modules/${packageName}`;
-  const tasksDir = `${nodeModules}/tasks`;
+  const path = require("node:path");
+  const nodeModules = path.resolve(projectRoot, "node_modules", packageName);
+  const tasksDir = path.join(nodeModules, "tasks");
   const fs = require("node:fs");
 
   if (!fs.existsSync(tasksDir)) {
@@ -50,7 +51,7 @@ export async function commandInstall(
   // Determine namespace from the package's package.json if present,
   // otherwise use the package name
   let namespace = packageName;
-  const pkgJsonPath = `${nodeModules}/package.json`;
+  const pkgJsonPath = path.join(nodeModules, "package.json");
   if (fs.existsSync(pkgJsonPath)) {
     try {
       const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
@@ -82,7 +83,18 @@ export async function commandInstall(
     }
   }
 
-  addPackage(dataDir, packageName, "1.0.0", tasksDir, namespace);
+  // Get actual version from package.json if possible
+  let version = "1.0.0";
+  try {
+    if (fs.existsSync(pkgJsonPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+      if (typeof pkg.version === "string") {
+        version = pkg.version;
+      }
+    }
+  } catch {}
+
+  addPackage(dataDir, packageName, version, tasksDir, namespace);
   console.log(`Installed ${packageName} (namespace: ${namespace})`);
   console.log(`Lockfile: ${lockfilePath}`);
 
