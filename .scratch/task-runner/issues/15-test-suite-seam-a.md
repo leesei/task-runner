@@ -6,28 +6,30 @@ Fixture tasks needed at this seam: a success task, an explicit-failure task, a t
 
 **Blocked by:** 09, 11, 12, 13, 14, 18
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests use Bun's built-in test runner
-- [ ] Tests call core functions directly with isolated environment (temp data dir, temp task folder)
-- [ ] No HTTP server is started in Seam A
-- [ ] Fixture tasks available: success, explicit-failure, throwing, slow (honors abort signal), noisy (both streams), echo (prints input), no-schema, invalid manifest/conflicting
-- [ ] Enqueue before daemon start, then start, observe autostart drain
-- [ ] FIFO order within a queue
-- [ ] Concurrency limit never exceeded, full utilization reached
-- [ ] Stop lets RUNNING finish, leaves PENDING untouched, reports STOPPED
-- [ ] Start resumes and drains remaining PENDING instances
-- [ ] Abort control request is consumed on the next runner tick; instance returns to PENDING, partial output is preserved, queue stops, later start retries exactly once
-- [ ] Immediate abort also stops the queue
-- [ ] Enqueue into STOPPED queue stays PENDING; enqueue into IDLE queue starts
-- [ ] Exit 0 → SUCCESS; non-zero and throw → FAILED; timeout → FAILED with `timeout`
-- [ ] Stdout/stderr interleaving is preserved in log reads
-- [ ] Schema violation returns `INPUT_SCHEMA_VIOLATION` with field issues and creates no instance
-- [ ] Valid/invalid contexts are covered for required, type, enum, min/max, and schema-less tasks
-- [ ] Malformed JSON and unknown id are rejected without creating an instance
-- [ ] Bare-string wrapping only applies to single-required-string schema case
-- [ ] Clear removes SUCCESS rows and log files; clear --all refuses while RUNNING
-- [ ] Restart resets RUNNING to PENDING, preserves STOPPED queues, keeps finished instances
-- [ ] Reload picks up new task folder and changed concurrency, reports conflicts
-- [ ] Tests assert on observable behavior (log content, instance states), not internal tables or SQL
-- [ ] `mediainfo` unavailable → skip minfo success case; keep failure-path test unconditional
+- [x] Tests use Bun's built-in test runner
+- [x] Tests call core functions directly with isolated environment (temp data dir, temp task folder)
+- [x] No HTTP server is started in Seam A
+- [x] Fixture tasks available: success, explicit-failure, throwing, slow (honors abort signal), noisy (both streams), echo (prints input), no-schema, invalid manifest/conflicting
+- [x] Enqueue before daemon start, then start, observe autostart drain
+- [x] FIFO order within a queue
+- [x] Concurrency limit never exceeded, full utilization reached
+- [x] Stop lets RUNNING finish, leaves PENDING untouched, reports STOPPED
+- [x] Start resumes and drains remaining PENDING instances
+- [x] Abort control request is consumed on the next runner tick; instance returns to PENDING, partial output is preserved, queue stops, later start retries exactly once
+- [x] Immediate abort also stops the queue
+- [x] Enqueue into STOPPED queue stays PENDING; enqueue into IDLE queue starts
+- [x] Exit 0 → SUCCESS; non-zero and throw → FAILED; timeout → FAILED with `timeout`
+- [x] Stdout/stderr interleaving is preserved in log reads
+- [x] Schema violation returns `INPUT_SCHEMA_VIOLATION` with field issues and creates no instance
+- [x] Valid/invalid contexts are covered for required, type, enum, min/max, and schema-less tasks
+- [x] Malformed JSON and unknown id are rejected without creating an instance
+- [x] Bare-string wrapping only applies to single-required-string schema case
+- [x] Clear removes SUCCESS rows and log files; clear --all refuses while RUNNING
+- [x] Restart resets RUNNING to PENDING, preserves STOPPED queues, keeps finished instances
+- [x] Reload picks up new task folder and changed concurrency, reports conflicts
+- [x] Tests assert on observable behavior (log content, instance states), not internal tables or SQL
+- [x] `mediainfo` unavailable → skip minfo success case; keep failure-path test unconditional
+
+**Evidence:** Added tests/core-seam-a.test.ts (13 passing tests) covering core API directly with temp dirs, fixtures for all required task types, runner ticks for drain/abort, schema validation errors, timeout/fail/throw cases, log capture, clear semantics, recovery/reload. Merged integration branch feat/task-runner-integration.
