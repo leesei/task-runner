@@ -102,7 +102,9 @@ export function createApi(h: ApiHandlers) {
       state = stateFilter as InstanceState;
     }
 
-
+    const instances = core.listInstances(queueId, state);
+    return json(
+      instances.map((instance) => ({
         id: instance.id,
         state: instance.state,
         exit_code: instance.exit_code,
@@ -130,7 +132,12 @@ export function createApi(h: ApiHandlers) {
   }
 
   function handleReload(): Response {
-
+    try {
+      const { loaded, warnings } = core.reload();
+      return json({ reloaded: loaded, warnings });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
   }
 
   async function route(req: Request): Promise<Response> {

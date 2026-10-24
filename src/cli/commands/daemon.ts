@@ -17,6 +17,7 @@ import { createCore } from "../../core/service.ts";
 import { createRunner } from "../../runner/runner.ts";
 import { installConsoleInterception } from "../../runner/execution.ts";
 import { createApi } from "../../api/index.ts";
+import { getDashboardHtml } from "../dashboard.ts";
 
 export async function commandDaemon(
   dataDir: string,
@@ -110,9 +111,10 @@ export async function commandDaemon(
         if (url.pathname.startsWith("/api/") || url.pathname === "/api") {
           return apiRouter(req);
         }
-        return new Response(" tq dashboard (not yet implemented) ", {
+        // Serve dashboard for root and other non-API routes
+        return new Response(getDashboardHtml(), {
           status: 200,
-          headers: { "Content-Type": "text/html" },
+          headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       },
     });
@@ -141,7 +143,9 @@ export async function commandDaemon(
   const controller = new AbortController();
   const shutdown = () => {
     console.error("\nShutting down...");
-    try { fs.unlinkSync(descriptorPath); } catch {}
+    try {
+      fs.unlinkSync(descriptorPath);
+    } catch {}
     if (db) closeDatabase(db);
     server.stop();
     controller.abort();
