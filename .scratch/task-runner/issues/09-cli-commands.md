@@ -4,25 +4,27 @@
 
 **Blocked by:** 13, 18
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `tq add <task> [context]`: parses all context sources, resolves path fields, calls core validation/enqueue, prints id + time + task + context
-- [ ] `tq add` supports escaped JSON, `@file`, `name=value`, and `name:=value`
-- [ ] `tq add` rejects schema violations with field issues and exit code 2
-- [ ] Relative `format: "path"` values resolve against the invocation directory; absolute values are kept
-- [ ] `-v`/`--verbose` is global and repeatable; diagnostics go to stderr
-- [ ] `tq start <queue>`: calls core to begin draining pending instances
-- [ ] `tq stop <queue>`: calls core to finish running instances, start nothing new
-- [ ] `tq abort <queue>`: writes an abort control request; runner returns instances to PENDING, leaves queue stopped
-- [ ] `tq clear [--all] <queue>`: calls core to delete SUCCESS instances (or all finished) and their logs
-- [ ] `tq status`: calls core to read queues; prints state, concurrency, running, pending counts
-- [ ] `tq logs <instance-id>`: calls core to read and print merged stdout/stderr log
-- [ ] `tq reload`: calls core discovery, writes a reload request, waits for runner consumption
-- [ ] CLI imports and calls core operations in-process
-- [ ] CLI never calls `fetch`/`Bun.fetch`, `/api/*`, or `/api/health`
-- [ ] CLI does not use the daemon port for command behavior
-- [ ] Offline commands (`add`, `status`, `logs`, `clear`) work with the daemon stopped
-- [ ] Live control commands (`start`, `stop`, `abort`, `reload`) fail clearly without a live daemon
-- [ ] Daemon liveness uses `daemon.json` pid + `process.kill(pid, 0)`, not an HTTP probe
-- [ ] Exit code 0: success; 1: runtime failure; 2: usage/unknown task/malformed input/schema violation
-- [ ] `--data-dir` flag accepted by all commands so offline commands find the same database
+**Evidence:** Updated CLI in src/cli/index.ts, args.ts, commands/add.ts to match spec (add prints instance id/time/task/context; global -v/--verbose with stderr diagnostics; all commands accept --data-dir; offline commands use core in-process; live control commands require daemon via daemon.json pid check with process.kill(pid,0), no HTTP probe; exit codes 0/1/2). Merged feat/task-runner-integration. All tests pass (112 pass, 0 fail).
+
+- [x] `tq add <task> [context]`: parses all context sources, resolves path fields, calls core validation/enqueue, prints id + time + task + context
+- [x] `tq add` supports escaped JSON, `@file`, `name=value`, and `name:=value`
+- [x] `tq add` rejects schema violations with field issues and exit code 2
+- [x] Relative `format: "path"` values resolve against the invocation directory; absolute values are kept
+- [x] `-v`/`--verbose` is global and repeatable; diagnostics go to stderr
+- [x] `tq start <queue>`: calls core to begin draining pending instances
+- [x] `tq stop <queue>`: calls core to finish running instances, start nothing new
+- [x] `tq abort <queue>`: writes an abort control request; runner returns instances to PENDING, leaves queue stopped
+- [x] `tq clear [--all] <queue>`: calls core to delete SUCCESS instances (or all finished) and their logs
+- [x] `tq status`: calls core to read queues; prints state, concurrency, running, pending counts
+- [x] `tq logs <instance-id>`: calls core to read and print merged stdout/stderr log
+- [x] `tq reload`: calls core discovery, writes a reload request, waits for runner consumption
+- [x] CLI imports and calls core operations in-process
+- [x] CLI never calls `fetch`/`Bun.fetch`, `/api/*`, or `/api/health`
+- [x] CLI does not use the daemon port for command behavior
+- [x] Offline commands (`add`, `status`, `logs`, `clear`) work with the daemon stopped
+- [x] Live control commands (`start`, `stop`, `abort`, `reload`) fail clearly without a live daemon
+- [x] Daemon liveness uses `daemon.json` pid + `process.kill(pid, 0)`, not an HTTP probe
+- [x] Exit code 0: success; 1: runtime failure; 2: usage/unknown task/malformed input/schema violation
+- [x] `--data-dir` flag accepted by all commands so offline commands find the same database
