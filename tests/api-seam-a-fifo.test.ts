@@ -4,9 +4,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { resolveDataDir, bootstrapDataDir, openDatabase, closeDatabase, configureDatabase } from "../src/db/database.ts";
 import { loadAllTasks } from "../src/tasks/discovery.ts";
-import { ensureQueuesForTasks, autostartQueuesOnBoot } from "../src/runner/queue-state.ts";
 import { createApi } from "../src/api/index.ts";
 import { createRunner } from "../src/runner/runner.ts";
+import { createHarness, type TestHarness } from "./support/harness.ts";
 import { installConsoleInterception } from "../src/runner/execution.ts";
 import { getInstancesByQueue } from "../src/db/queries.ts";
 
@@ -28,6 +28,7 @@ describe("Seam A: FIFO", () => {
   let db: any;
   let api: (req: Request) => Promise<Response>;
   let runner: any;
+  let harness: TestHarness;
   let server: any;
   let baseUrl: string;
 
@@ -44,14 +45,15 @@ describe("Seam A: FIFO", () => {
       "README.md": "# echo"
     });
     loadAllTasks(db, projectDir, []);
-    ensureQueuesForTasks(db);
-    autostartQueuesOnBoot(db);
+    harness = createHarness(db, dataDir, projectDir);
+    harness.lifecycle.syncQueues();
+    harness.lifecycle.recoverOnBoot();
     installConsoleInterception();
-    api = createApi({ db, dataDir, cwd: projectDir });
-    runner = createRunner({ dataDir, pollIntervalMs: 5 });
+    api = createApi({ core: harness.core, events: harness.events, dataDir, cwd: projectDir });
+    runner = createRunner({ db, lifecycle: harness.lifecycle, pollIntervalMs: 5 });
     server = Bun.serve({ port: 0, fetch: api });
     baseUrl = `http://localhost:${server.port}`;
-    runner.runContinuous(db).catch(() => {});
+    runner.runContinuous().catch(() => {});
   });
 
   afterAll(() => {

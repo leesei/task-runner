@@ -6,8 +6,7 @@
  * daemon HTTP API.
  */
 
-import { reloadTasks, requestReload } from "../../core/service.ts";
-import { closeDatabase, openDatabase, resolveDataDir } from "../../db/database.ts";
+import { openCliCore } from "../core.ts";
 
 export async function commandReload(
   dataDir: string,
@@ -20,29 +19,28 @@ export async function commandReload(
     return 1;
   }
 
-  const dbConfig = resolveDataDir(dataDir);
-  let db;
+  let cli;
   try {
-    db = openDatabase(dbConfig.dbPath);
+    cli = openCliCore(dataDir, { projectRoot });
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
   try {
-    const { loaded, warnings } = reloadTasks(db, projectRoot, dataDir);
+    const { loaded, warnings } = cli.core.reload();
     console.log(`Reloaded ${loaded} task(s)`);
     for (const warning of warnings) {
       console.warn(`Warning: ${warning}`);
     }
 
-    if (!(await requestReload(db))) {
+    if (!(await cli.core.requestReload())) {
       console.error("Error: daemon did not process the reload request in time");
       return 1;
     }
 
     return 0;
   } finally {
-    closeDatabase(db);
+    cli.close();
   }
 }

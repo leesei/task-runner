@@ -1,209 +1,304 @@
 # Design
 
 How the daemon, database, lifecycle, and subcommands fit together. This
-document describes the target design recorded in
-[ADR-0001](adr/0001-task-lifecycle-ownership.md). `docs/SPECS.md` is the
-behavioural specification; `GLOSSARY.md` defines the domain terms. Some parts
-are not implemented yet — see [Known gaps](#known-gaps).
+document is the design record for the task lifecycle. `docs/SPECS.md` is the
+behavioural specification; `GLOSSARY.md` defines the domain terms.
 
-## Overview
+The lifecycle decision is [ADR-0001](adr/0001-task-lifecycle-ownership.md).
+The completion fence is [ADR-0002](adr/0002-completion-fence.md). Some parts
+are not implemented yet — see [Limitations](#limitations).
 
-`tq` is one Bun process for the daemon plus a CLI that can run offline against
-the same SQLite database. Task definitions are discovered from a search path,
-each definition gets one queue, and enqueued work becomes a task instance.
+## Context
 
-The design has four pieces:
+Task instance and queue state is currently written from four places: the
+runner marks instances `RUNNING` and returns them to `PENDING`, execution marks
+`SUCCESS`/`FAILED` and increments attempts, `queue-state.ts` owns queue
+transitions while enqueue, autostart, and drain write queue state directly, and
+`control/queue-control.ts` contains a dead second abort implementation.
 
-- **core** — transport-independent operations. It owns database access, input
-  validation, queue and instance rules, and typed errors.
-- **task lifecycle** — the state machine behind core. It owns every write to
-  queue and instance state and publishes state-change events after commit.
-- **adapters** — the CLI and the HTTP API. They parse input, call core, map
-  errors, and format output. Neither owns queue or instance rules.
-- **runner** — the daemon loop. It claims runnable instances from the lifecycle,
-  launches task modules, enforces timeouts, and consumes durable control
-  requests.
+The concurrency limit is enforced by a read-then-write sequence in the runner,
+outside a transaction. The HTTP adapter imports database rows for reads, and
+the runner imports the HTTP adapter's event emitter. The lifecycle is shallow:
+its interface is a set of row-level updates, its callers do not use it
+consistently, and its invariants live at call sites.
 
+The design replaces that with one deep module that owns instance and queue
+transitions. The module is transport-independent, persists only state, uses
+one transaction per intent, and publishes events after commit.
+
+## Module map
+
+```mermaid
+flowchart LR
+  CLI[CLI adapter] --> Core[Core]
+  API[HTTP API adapter] --> Core
+  Core --> Lifecycle[Task lifecycle]
+  Core --> Discovery[Discovery / registry]
+  Runner[Runner] --> Lifecycle
+  Runner --> Execution[Execution]
+  Discovery --> Lifecycle
+  Lifecycle --> DB[(SQLite)]
+  Lifecycle --> Sink[Event sink]
+  Sink --> Bus[Event bus]
+  Bus --> API
+  Execution --> Logs[(JSONL logs)]
 ```
-             ┌────────────────┐
- CLI ───────▶│                │
-             │      core      │──────▶ lifecycle ──▶ SQLite
- HTTP API ──▶│  (createCore)  │              │
-             └────────────────┘              └──▶ EventSink ──▶ event bus ──▶ SSE
- runner ────▶ lifecycle
-      └─────▶ execution ──▶ instance-<id>.jsonl
+
+The dependencies point inward. `Lifecycle` imports only the database handle,
+its own event types, and `CoreError`. It does not import `cli`, `api`,
+`runner`, or `control`.
+
+## Modules and interfaces
+
+### Task lifecycle
+
+`src/core/lifecycle.ts` is the only writer of queue and instance state,
+including deletes. It owns both state machines and the coupling between them.
+
+```ts
+type QueueState = "IDLE" | "PROCESSING" | "STOPPED";
+type InstanceState = "PENDING" | "RUNNING" | "SUCCESS" | "FAILED";
+
+interface ClaimToken {
+  instanceId: number;
+  attempt: number;
+}
+
+interface Claim extends ClaimToken {
+  taskId: string;
+  entryPoint: string;
+  timeoutMs: number;
+  input: unknown;
+  logPath: string;
+}
+
+type RunOutcome =
+  | { kind: "success" }
+  | { kind: "failure"; exitCode: number; reason?: string }
+  | { kind: "timeout" };
+
+interface FinishResult {
+  applied: boolean;
+  ignored?: "not-running" | "stale-attempt";
+}
+
+interface AbortResult {
+  // Attempts that were RUNNING before the abort increment.
+  cancelled: ClaimToken[];
+  queueState: QueueState;
+  // True when the request's tokens no longer match a RUNNING instance.
+  discarded?: boolean;
+}
+
+interface ClearResult {
+  deleted: number;
+  logPaths: string[];
+}
+
+interface Lifecycle {
+  enqueue(taskId: string, input: unknown): { id: number; createdAt: string };
+  claim(): Claim[];
+  claimQueue(queueId: string): Claim[];
+  finishRun(token: ClaimToken, outcome: RunOutcome): FinishResult;
+  abortQueue(queueId: string, expected?: ClaimToken[]): AbortResult;
+  start(queueId: string): QueueState;
+  stop(queueId: string): QueueState;
+  syncQueues(): { created: number; updated: number };
+  recoverOnBoot(): { reset: number; started: number; stayedStopped: number };
+  clearQueue(queueId: string, options?: { all?: boolean }): ClearResult;
+}
+
+function createLifecycle(config: {
+  db: DB;
+  events: EventSink;
+  logDir: string;
+  now?: () => Date;
+}): Lifecycle;
 ```
 
-## Process model
+`claim()` is the runner's normal call: it visits every `PROCESSING` queue in
+queue-id order and claims FIFO within each queue. `claimQueue(queueId)` is
+the per-queue primitive for tests and future queue-specific scheduling. Both
+share one internal `claimFromQueue` helper and the same guarded SQL; neither is
+a separate scheduling policy. `claim()` must not call the public
+`claimQueue()`, which would open a nested transaction; both call
+`claimFromQueue`. If `claimQueue` ever loses its callers, it can be deleted
+without changing `claim()`.
 
-- One daemon process owns the runner loop, the HTTP listener, and the task
-  modules. Tasks execute in-process; there is no worker, child process, or
-  container.
-- The CLI is a separate process. It opens the same data directory, calls core
-  in-process, and never calls the daemon over HTTP.
-- Cross-process commands that need the live runner (`abort`, `reload`) use
-  durable rows in `control_requests`. The runner consumes them on its poll tick.
-- Daemon liveness is read from the descriptor pid, never from an HTTP health
-  probe.
+`claim()` is a mutating operation, not a query: it atomically marks the
+returned instances `RUNNING`. It returns `[]` when nothing is claimable; an
+empty result is normal, not an error. `claimQueue(queueId)` returns `[]` when
+that queue is not `PROCESSING`, has no pending work, or is at capacity.
 
-## Task definitions and discovery
+`claim()` and `claimQueue()` open an immediate write transaction, compute
+the free slots from the running count, select `PENDING` rows in id order, and
+mark them `RUNNING` with `started_at` and `log_path`. The caller never reads
+state to decide what may run.
 
-A task is a folder with:
+`finishRun` takes the token observed at claim. It applies only when the row is
+`RUNNING` and its attempt matches the token; otherwise it returns
+`{ applied: false }` and writes nothing. This is the fence from ADR-0002.
+`success` records exit code 0; `failure` records the supplied exit code and
+reason; `timeout` records `FAILED` with reason `timeout`.
 
-- `index.ts` — default-exports the task function;
-- `README.md`;
-- `settings.json` — namespace, id, name, description, concurrency, optional
-  input schema, category, timeout;
-- optionally a JSON Schema file referenced from the manifest.
+`abortQueue` moves the queue's current `RUNNING` instances back to `PENDING`,
+increments their attempts, stops the queue, and returns the attempts that were
+running so the runner can signal the right controllers. It does not claim or
+start work. The optional `expected` tokens are the control request's recorded
+tokens: if provided and none matches a currently `RUNNING` instance, the
+request is stale, returns `{ cancelled: [], discarded: true }`, and changes
+nothing. The core operation is also called `abort`, but it is the two-phase
+control-request path; it never calls `abortQueue` itself.
 
-The task id is `namespace:id`. Search order is project tasks, then user tasks,
-then installed packages in lockfile order; the first match wins and conflicts
-are reported as warnings.
+`start` and `stop` are idempotent intent operations. `stop` targets `STOPPED`
+from any state. `start` targets `PROCESSING` when there is pending or running
+work, and `IDLE` when there is nothing to do. Same-state calls are no-ops.
 
-Discovery and persistence are separate responsibilities:
+`enqueue` trusts its input. Input validation stays in core, before the
+lifecycle call. `enqueue` ensures the queue exists, inserts the instance, and
+moves an `IDLE` queue to `PROCESSING` in the same transaction.
 
-- **discovery** scans the search path and returns task definitions and warnings.
-  It does not write the database.
-- **the task registry** reconciles definitions into the `tasks` table and calls
-  the lifecycle's `syncQueues()` to ensure one queue per task and update
-  concurrency.
+`syncQueues` ensures one queue per task and updates concurrency for existing
+queues. It never deletes. Queue retirement is deferred until the historical
+instance question is settled.
 
-Queue retirement for removed tasks is deferred (see [Known gaps](#known-gaps)).
+`recoverOnBoot` resets every `RUNNING` instance to `PENDING`, increments its
+attempt, keeps `STOPPED` queues stopped, and autostarts every other queue.
 
-## Data directory and persistence
+`clearQueue` deletes `SUCCESS` instances by default, or `SUCCESS` and `FAILED`
+with `{ all: true }`. `{ all: true }` refuses with `CLEAR_REFUSED_RUNNING` if
+any instance is `RUNNING`; the default cannot encounter a running `SUCCESS`
+instance. It returns the deleted log paths; the module never touches the
+filesystem.
 
-The default data directory is `.task-runner/` in the project root. It holds:
+The event contract, in `src/core/events.ts`, is:
 
-- `taskrunner.db` — SQLite;
-- `logs/` — one JSONL file per task instance;
-- `daemon.json` — pid, port, data directory, start time.
+```ts
+type LifecycleEvent =
+  | { type: "instanceStateChanged"; instanceId: number; state: InstanceState }
+  | { type: "queueStateChanged"; queueId: string; state: QueueState };
 
-SQLite stores task definitions, queues, instances, and control requests. Logs
-stay out of SQLite so large output does not grow the database.
+interface EventSink {
+  publish(event: LifecycleEvent): void;
+}
+```
 
-Instance ids are monotonically increasing integers and are the handle used by
-the CLI, the API, and the dashboard.
+#### Instance state
 
-### Tables
+```text
+PENDING ──claim──▶ RUNNING ──exit 0 / return──▶ SUCCESS
+                       └──── non-zero / throw / timeout ──▶ FAILED
+RUNNING ──abort / recovery──▶ PENDING
+                              attempt incremented, partial log kept
+```
 
-| Table              | Purpose                                                              |
-| ------------------ | -------------------------------------------------------------------- |
-| `tasks`            | Discovered definitions, including the entrypoint path and schema.    |
-| `queues`           | One row per task id; state and concurrency.                          |
-| `instances`        | Enqueued runs; state, attempt, input, timings, exit code, log path.  |
-| `control_requests` | Durable `abort` and `reload` commands, consumed once by the runner.  |
+#### Queue state
 
-## Core
+```text
+IDLE ⇄ PROCESSING
+IDLE ──stop──▶ STOPPED
+PROCESSING ──stop / abort──▶ STOPPED
+STOPPED ──start with work──▶ PROCESSING
+STOPPED ──start with no work──▶ IDLE
+PROCESSING ──drained──▶ IDLE
+```
 
-`src/core/service.ts` exposes `createCore({ db, lifecycle })`. The lifecycle is
-private to core; adapters call core operations only.
+#### Invariants
 
-Core operations cover:
+- Queue id equals task id. A task definition has exactly one queue.
+- `claim` is the only `PENDING → RUNNING` transition and does not increment
+  the attempt.
+- `abortQueue` and `recoverOnBoot` are the only `RUNNING → PENDING`
+  transitions. Both increment the attempt and clear per-attempt result fields.
+- `finishRun` applies only to a `RUNNING` row whose attempt matches the claim
+  token.
+- A `PROCESSING` queue drains to `IDLE` when the last running instance finishes
+  and nothing is pending. A `STOPPED` queue never auto-drains.
+- Enqueue into `IDLE` starts the queue; enqueue into `STOPPED` leaves it
+  stopped; enqueue into `PROCESSING` leaves it processing.
+- `claim` repairs an empty `PROCESSING` queue to `IDLE` in the same transaction.
+- A `STOPPED` queue stays stopped across a restart.
+- The lifecycle touches no filesystem, imports no task module, owns no
+  `AbortController`, and enforces no timeout.
+
+#### Transactions and errors
+
+Every intent is one SQLite immediate transaction. Events are collected during
+the transaction and published only after commit. A failed transaction publishes
+nothing.
+
+Domain errors are `CoreError` from `src/core/errors.ts` with a stable code:
+
+| Code | When |
+| --- | --- |
+| `TASK_NOT_FOUND` | `enqueue` names an unknown task, or `claim` finds a pending instance whose task row is missing |
+| `QUEUE_NOT_FOUND` | `start`, `stop`, `abortQueue`, `clearQueue`, or `claimQueue` names an unknown queue |
+| `CLEAR_REFUSED_RUNNING` | `clearQueue({ all: true })` finds a `RUNNING` instance |
+| `INVALID_CONCURRENCY` | `syncQueues` reads a non-positive concurrency |
+
+A stale or non-running finish is not an error. It returns
+`{ applied: false, ignored: "stale-attempt" | "not-running" }`. The runner's
+completion path stays total.
+
+#### What sits behind the seam
+
+The schema and SQL; transaction boundaries and locks; FIFO selection and
+concurrency arithmetic; the attempt fence; state legality and idempotence;
+timestamp and duration policy; log-path allocation; enqueue/autostart,
+abort/stop, finish/drain coupling; boot recovery; and event ordering.
+
+#### Trade-off
+
+The module is deep because the interface is intent-level and the implementation
+holds both state machines. The cost is a ten-method surface and a small amount
+of ceremony in result types. Splitting queue and instance modules would
+recreate the coupling at enqueue and abort, which is exactly the invariant the
+module exists to own.
+
+### Core
+
+`src/core/service.ts` exposes `createCore({ db, lifecycle, projectRoot, dataDir })`.
+The lifecycle is private to core and the runner; adapters call core operations
+only.
+
+Core operations:
 
 - **enqueue and reads** — enqueue, list queues, queue detail, list instances,
   instance detail, read log, list task definitions;
 - **queue control** — start, stop, abort, clear;
 - **maintenance** — reload discovery, sync queues, boot recovery;
-- **install** — lockfile update and package task discovery (CLI-only adapter).
+- **install** — lockfile update and package task discovery (CLI-only).
 
-Core throws `CoreError` with a stable code. It does not parse CLI flags, print
-output, build HTTP responses, or import the HTTP adapter.
+Core validates input before calling `lifecycle.enqueue`. `abort` is
+two-phase: core writes a durable control request and waits a bounded time; the
+runner performs the lifecycle abort and signals the controllers. Core does not
+perform the abort transition itself, so nothing changes when no daemon can
+consume the request.
 
-## Task lifecycle
+`clear` calls `lifecycle.clearQueue`, then unlinks the returned log paths
+best-effort. Reads stay in core over `db/queries`; they are projections, not
+state transitions.
 
-`src/core/lifecycle.ts` is the only writer of queue and instance state.
+### Runner
 
-```ts
-createLifecycle({ db, events, logDir }): Lifecycle
-
-enqueue(taskId, input): { id, createdAt }
-claimRunnable(queueId): Claim[]
-finishRun(instanceId, outcome): { applied, state?, queueState? }
-abortQueue(queueId): { instanceIds, queueState }
-start(queueId): QueueState
-stop(queueId): QueueState
-syncQueues(): { created, updated }
-recoverOnBoot(): { reset, started, stayedStopped }
-```
-
-`Claim` is `{ instanceId, taskId, entryPoint, timeoutMs, input, logPath }`.
-
-### Instance state
-
-```
-PENDING ──claim──▶ RUNNING ──exit 0 / return──▶ SUCCESS
-                       └──── non-zero / throw / timeout ──▶ FAILED
-RUNNING ──abort──▶ PENDING            (attempt incremented, partial log kept)
-```
-
-### Queue state
-
-```
-IDLE ⇄ PROCESSING
-PROCESSING ──stop / abort──▶ STOPPED
-STOPPED ──start──▶ PROCESSING
-PROCESSING ──last instance finishes──▶ IDLE
-```
-
-### Invariants
-
-- A queue is `IDLE` when draining is allowed but there is nothing to do; a
-  pending instance added to an `IDLE` queue moves it to `PROCESSING`.
-- A queue is `STOPPED` when draining is not allowed; pending work waits.
-- `claimRunnable` enforces FIFO order and concurrency inside one transaction.
-- `finishRun` drains the queue in the same transaction when the last running
-  instance finishes.
-- Late completion after abort, timeout, or recovery returns `{ applied: false }`
-  and changes nothing.
-- `abortQueue` recomputes the currently running instances; it does not trust ids
-  captured when the control request was written.
-- `recoverOnBoot` increments the attempt of every instance it resets, so attempt
-  counts every execution that started.
-- A task definition always has exactly one queue, and the queue id equals the
-  task id.
-
-### Transactions and errors
-
-Each intent-level operation uses one SQLite transaction. Events publish after
-commit. Failures throw `CoreError` from `src/core/errors.ts` with one of:
-
-`QUEUE_NOT_FOUND`, `INSTANCE_NOT_FOUND`, `INVALID_TRANSITION`,
-`CLEAR_REFUSED_RUNNING`, `TASK_NOT_FOUND`, plus input and transport codes added
-by other modules.
-
-## Event seam
-
-`src/core/events.ts` defines:
-
-- the event types: `queueStateChanged` and `instanceStateChanged`;
-- `EventSink` — `publish(event)`;
-- `createEventBus()` — fan-out to subscribers, with subscriber exceptions
-  isolated.
-
-The daemon creates one bus and injects it into the lifecycle and the HTTP
-adapter. The lifecycle publishes after commit, instance event before queue
-event. The HTTP adapter subscribes and translates events to SSE. The lifecycle
-never imports the adapter.
-
-The bus is an in-process seam. Tests inject a recording sink; the daemon injects
-the real bus. No adapter owns the listener registry.
-
-## Runner
-
-`createRunner({ db, lifecycle, events, pollIntervalMs })` runs one loop:
+`createRunner({ db, lifecycle, onReload, pollIntervalMs })` runs one loop:
 
 1. consume pending control requests;
-2. for each `PROCESSING` queue, call `lifecycle.claimRunnable(queueId)`;
-3. launch each claim with an `AbortController` and `executeTask`;
-4. `executeTask` calls `lifecycle.finishRun` on completion, timeout, or throw;
-5. queue draining happens inside `finishRun`.
+2. for abort requests, call `lifecycle.abortQueue(queueId, request.tokens)`,
+   then signal the returned tokens unless the request was discarded;
+3. for reload requests, call `onReload`;
+4. call `lifecycle.claim()`;
+5. launch each claim with an `AbortController` and `executeTask`;
+6. `executeTask` calls `lifecycle.finishRun(claim, outcome)` on completion,
+   timeout, or throw.
 
-The runner keeps the controller map, timeout timers, and task-module import. It
-does not write queue or instance state directly. Control-request reads remain
-the one direct `db/queries` use: they are a durable command channel, not task or
-queue state.
+Controllers are keyed by `instanceId:attempt`, never by instance id alone. A
+stale abort token therefore cannot signal a newer attempt.
 
-## Execution and logs
+The runner keeps the controller map, timeout timers, task-module import, and
+control-request consumption. It does not write queue or instance state.
+
+### Execution
 
 The execution context is:
 
@@ -215,83 +310,221 @@ interface ExecutionContext<TInput> {
 }
 ```
 
-- The default export is the execution contract. Calling `done(0)` succeeds;
+- The default export is the execution contract. `done(0)` succeeds;
   `done(nonZero)` or a throw fails; returning without `done` succeeds.
-- Console interception is installed once at daemon start. Each execution runs in
-  an `AsyncLocalStorage` scope tagged with the instance id, so concurrent
-  instances write to the right log.
+- Console interception is installed once at daemon start. Each execution runs
+  in an `AsyncLocalStorage` scope tagged with `(instanceId, attempt)`, so
+  concurrent instances write to the right log and a stale attempt's output can
+  be dropped.
 - Logs are append-only JSONL, one file per instance. The lifecycle computes
   `instance-<id>.jsonl` and persists `log_path` when it claims the instance.
-  Execution appends; it never truncates, so a retry preserves the previous
+  Execution creates/appends; it never truncates. A retry preserves the previous
   attempt.
-- Cancellation is cooperative. The runner signals the instance's
-  `AbortController`; a task that ignores the signal may keep running after its
-  instance returns to `PENDING`. Late writes are fenced by the lifecycle's
-  `applied: false` check.
+- Timeout completion is committed before the signal fires, so a `done()` from
+  an abort handler is a late completion and cannot win.
+- Cancellation is cooperative. The runner signals the instance's controller;
+  a task that ignores the signal may keep running after its instance returns
+  to `PENDING`. The fence discards its late state writes.
 
-## CLI
+### Task registry and discovery
 
-Every command:
+Discovery scans project tasks, user tasks, and installed packages in lockfile
+order. It returns definitions and warnings; it does not write the database.
 
-1. resolves the project and data directory;
-2. opens the database and constructs the lifecycle and core;
-3. calls one core operation;
-4. maps errors and prints output;
-5. closes the database.
+The registry reconciles definitions into the `tasks` table and calls
+`lifecycle.syncQueues()` to ensure one queue per task and update concurrency.
+Queue retirement for removed tasks is deferred.
 
-`src/cli/errors.ts` maps `CoreError.code` to an exit code: usage, unknown id, and
-invalid input return 2; runtime failures return 1. Diagnostics from `-v` go to
-stderr so stdout stays machine-readable.
+### Persistence
 
-The CLI never calls the daemon's HTTP API. Commands that need the live runner
-check the descriptor pid and write a control request.
+The default data directory is `.task-runner/` in the project root:
 
-## HTTP API
+- `taskrunner.db` — SQLite;
+- `logs/` — one JSONL file per task instance;
+- `daemon.json` — pid, port, data directory, start time.
 
-`createApi({ core, events, dataDir, cwd })` is an adapter over core. Handlers:
+SQLite stores task definitions, queues, instances, and control requests. Logs
+stay out of SQLite so large output does not grow the database.
 
-1. parse and validate transport input;
-2. call one core operation;
-3. map `CoreError.code` to a status and JSON error body;
-4. serialize the result.
+| Table | Purpose |
+| --- | --- |
+| `tasks` | Discovered definitions, including the entrypoint path and schema. |
+| `queues` | One row per task id; state and concurrency. |
+| `instances` | Enqueued runs; state, attempt, input, timings, exit code, log path. |
+| `control_requests` | Durable `abort` and `reload` commands, consumed once by the runner. |
 
-SSE handlers subscribe to the event bus. Log streaming replays the instance log
-and then follows it. The API carries no queue or instance rules of its own.
+Writes open an immediate transaction so the CLI and daemon cannot both read
+the same free-slot count and over-claim.
 
-The dashboard is a read-only consumer of the same endpoints and events. It is
-not implemented yet.
+### Adapters
+
+**CLI.** Every command resolves the project and data directory, opens the
+database, constructs the lifecycle and core, calls one core operation, maps
+errors, prints output, and closes the database. The CLI never calls the
+daemon's HTTP API. Commands that need the live runner check the descriptor pid
+and write a control request. Exit codes: 2 for usage, unknown id, or invalid
+input; 1 for runtime failure.
+
+**HTTP.** `createApi({ core, events, dataDir })` maps transport input to core
+calls, `CoreError.code` to status and JSON error bodies, and core results to
+responses. SSE handlers subscribe to the event bus. The API carries no queue
+or instance rules. The dashboard is a read-only consumer of the same endpoints
+and events; it is not implemented yet.
+
+## Seams and adapters
+
+**Lifecycle seam.** Core and the runner call the intent methods. SQLite is the
+implementation, not a repository adapter: a repository port narrow enough to
+be honest would leak row writes, and one rich enough to be safe would be the
+lifecycle. Tests use a temporary SQLite database with the same schema, so they
+cross the same seam as production.
+
+**Event sink seam.** `EventSink.publish(event)` has two real adapters: the
+daemon's `createEventBus()` and a recording sink in tests. The lifecycle
+publishes after commit, instance event before queue event, and isolates sink
+failures so a bad subscriber cannot fail a transition. Within a transaction,
+instance events publish in ascending instance-id order, then queue events in
+ascending queue-id order; a no-op publishes nothing. `syncQueues` publishes
+`IDLE` for created queues; concurrency-only updates publish no event because
+the event vocabulary has no concurrency change. Events are notifications, not
+truth; a dashboard reads a snapshot and then subscribes.
+
+**Core seam.** The CLI and HTTP API are adapters over the same core
+operations. They parse, call, map, and format; they do not own queue rules.
+
+**Execution seam.** The task's default export is the adapter over execution.
+The lifecycle hands over a `Claim`; execution owns import, timeout, console
+interception, and log append.
+
+**Control-request channel.** The runner reads `control_requests` directly via
+`db/queries`. This is the one documented exception to "core owns database
+access": the request is a durable cross-process command, not task or queue
+state.
+
+**Claim helpers.** `claim()` and `claimQueue()` share one internal helper.
+This is deliberate duplication of entry points, not of scheduling rules. The
+runner uses `claim()`; tests and future queue-specific callers use
+`claimQueue()`.
+
+## Data flow
+
+### Task flow and calls
+
+The normal path is enqueue → claim → execute → finish. Control calls are shown
+separately because they can happen before, during, or after a run.
+
+```mermaid
+flowchart TD
+  subgraph TaskPath [Task path]
+    A["[CLI or API] add"] -->|"[Core] enqueue()"| B["[Lifecycle] enqueue()"]
+    B --> C["[Instance] PENDING<br/>[Queue] IDLE -> PROCESSING"]
+    C -->|"runner tick: [Lifecycle] claim()"| D["[Lifecycle] claimFromQueue()<br/>via claim() or claimQueue()"]
+    D --> E["[Instance] RUNNING<br/>log_path persisted"]
+    E -->|"[Runner] executeTask(claim, signal)"| X["[Execution]"]
+    X -->|"call default export"| F["[Task] function"]
+    F -.->|"done(0) / throw / timeout"| X
+    X -->|"[Lifecycle] finishRun(token, success)"| G["[Instance] SUCCESS"]
+    X -->|"[Lifecycle] finishRun(token, failure or timeout)"| H["[Instance] FAILED"]
+    G --> I["[Queue] drain -> IDLE"]
+    H --> I
+  end
+
+  subgraph Control [Control and recovery]
+    J["[CLI or API] start / stop"] -->|"[Core] start() / stop()"| K["[Lifecycle] start() / stop()<br/>[Queue] PROCESSING/IDLE or STOPPED"]
+    L["[CLI or API] abort"] -->|"[Core] abort()"| M["[SQLite] control_requests row<br/>[Queue] + claim tokens"]
+    M -->|"[Runner] consumes"| N["[Lifecycle] abortQueue(queue, tokens)"]
+    N --> O["[Instance] PENDING<br/>attempt + 1"]
+    N --> P["[Queue] STOPPED"]
+    Q["[CLI or API] clear"] -->|"[Core] clear()"| R["[Lifecycle] clearQueue()"]
+    S["[CLI or API] reload"] -->|"[Core] reload()"| T["[Discovery] + [Lifecycle] syncQueues()"]
+    U["[Daemon] boot"] -->|"[Lifecycle] recoverOnBoot()"| O
+    O -.->|"next claim"| D
+  end
+```
+
+Dotted arrows are returns or re-entry. Abort and recovery return an instance
+to `PENDING` with `attempt + 1`; the next claim gets a new token. `core.abort()`
+writes the control request and waits; the runner consumes it and calls
+`lifecycle.abortQueue()`. `start` and `stop` set the queue's target state,
+`clearQueue` deletes finished rows, and `syncQueues` reconciles task
+definitions with queues.
+
+### Actor sequence
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as [CLI or HTTP]
+  participant K as [Core]
+  participant L as [Lifecycle]
+  participant D as [SQLite]
+  participant S as [EventSink]
+  participant R as [Runner]
+  participant E as [Execution]
+
+  C->>K: enqueue(task, input)
+  K->>L: enqueue
+  L->>D: insert [Instance]; [Queue] IDLE -> PROCESSING
+  L-->>S: [Instance] PENDING, [Queue] PROCESSING (after commit)
+  R->>L: claim()
+  L->>L: claimFromQueue(queueId)
+  L->>D: [Instance] PENDING -> RUNNING; persist log_path
+  L-->>S: [Instance] RUNNING
+  R->>E: executeTask(claim, signal)
+  E-->>L: finishRun(token, outcome)
+  L->>D: [Instance] RUNNING -> SUCCESS/FAILED; [Queue] drain
+  L-->>S: [Instance] terminal, [Queue] IDLE
+```
+
+Abort is the two-phase path: core writes the request, the runner calls
+`lifecycle.abortQueue(queueId, request.tokens)`, the lifecycle commits
+`RUNNING → PENDING` and `STOPPED`, and only then does the runner fire the
+returned controllers. A request whose tokens no longer match a running attempt
+is discarded without changing state.
 
 ## Testing
 
-The test surface follows the seams in `docs/SPECS.md`:
+The lifecycle interface is the primary test surface. Tests open a temporary
+SQLite database with the production schema, inject a recording `EventSink` and
+a fixed clock, and call lifecycle operations directly. They cover FIFO,
+concurrency, enqueue autostart, stop/start, abort, drain, recovery, clear, and
+the completion fence: finish with an old token after a re-claim and assert
+`applied: false`.
 
-- **lifecycle seam (primary)** — call lifecycle operations against a temporary
-  SQLite database with a recording `EventSink`. Cover FIFO, concurrency, stop,
-  start, abort, drain, recovery, late completion, and events.
-- **core seam** — core operations, discovery, enqueue, clear, reload, and error
-  codes.
-- **CLI seam** — subprocess tests for argument parsing, output, exit codes, and
-  offline operation.
-- **HTTP seam** — status codes, structured errors, SSE, and log streaming.
+Core tests cover validation, reads, control-request handoff, and error codes.
+CLI tests run the binary against an isolated data directory and assert output
+and exit codes. HTTP tests assert status codes, structured errors, SSE, and log
+streaming. A guard test fails if `src/runner/**` or `src/core/**` imports
+`src/api/**`.
 
-Tests must not assert on internal tables. A guard test fails if `src/runner/**`
-or `src/core/**` imports `src/api/**`.
+## Limitations
 
-## Known gaps
-
-- The lifecycle extraction, core factory, event bus, and runner claim loop are
-  not implemented yet.
-- Input validation and CLI context grammar (`@file`, `name=value`, `name:=value`,
-  bare-string wrapping, path resolution) are pending.
+- The lifecycle extraction, completion fence, core factory, event bus, and
+  runner claim loop are not implemented yet.
+- Input validation and the CLI context grammar (`@file`, `name=value`,
+  `name:=value`, bare-string wrapping, path resolution) are pending.
 - Reload does not retire queues for removed tasks.
 - The dashboard is a placeholder.
 - The CLI repeats project setup in every command until the project-handle
   refactor lands.
 - The HTTP health handler reads `daemon.json` directly.
+- Events are in-process. A CLI-driven transition publishes into the CLI's sink,
+  which the daemon's SSE clients do not see. The daemon sees the resulting
+  queue state on its next tick; a live dashboard of CLI transitions needs a
+  durable outbox sink.
+- `clearQueue` deletes rows but publishes no event; SSE clients may need a
+  refresh or a future `queueChanged` event.
+- Cooperative cancellation means a task that ignores its signal can outlive
+  its instance. State writes are fenced; log bytes from a stale attempt are
+  dropped only if execution tags its ALS context with the attempt.
+- `claimQueue` is retained as a test and extension surface. If no non-test
+  caller appears, it can be deleted without changing `claim()`.
 
 ## References
 
 - `docs/SPECS.md` — behavioural specification and implementation decisions.
-- `docs/adr/0001-task-lifecycle-ownership.md` — why the lifecycle has one owner.
-- `GLOSSARY.md` — task, task instance, queue, task lifecycle, claim, event sink.
+- `docs/adr/0001-task-lifecycle-ownership.md` — one owner for the lifecycle.
+- `docs/adr/0002-completion-fence.md` — why completion carries the attempt.
+- `GLOSSARY.md` — task, task instance, queue, task lifecycle, claim, claim
+  token, event sink, event bus.
 - `tests/README.md` — fixtures and sample-task expectations.

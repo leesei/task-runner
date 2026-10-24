@@ -10,37 +10,52 @@ interface RunOpts {
   done: (exitCode: number) => void;
 }
 
-const RESULTS: Array<{ name: string; exit: number; stdout: string; stderr: string }> = [];
+interface Result {
+  name: string;
+  exit: number;
+  stdout: string;
+  stderr: string;
+  ok: boolean;
+}
 
-async function run(name: string, fn: (ctx: RunOpts) => Promise<void>) {
+const RESULTS: Result[] = [];
+
+async function run(
+  name: string,
+  fn: (ctx: RunOpts) => Promise<void>,
+  opts: { expectFailure?: boolean } = {},
+) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const origLog = console.log;
   const origErr = console.error;
-  console.log = (...a: unknown[]) => stdout.push(String(a.join(" ")));
-  console.error = (...a: unknown[]) => stderr.push(String(a.join(" ")));
 
   let exit = 999;
   const signal = new AbortController().signal;
-  fn({ input: {}, signal, done: (c) => { exit = c; } });
 
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  console.log = origLog;
-  console.error = origErr;
+  console.log = (...a: unknown[]) => stdout.push(String(a.join(" ")));
+  console.error = (...a: unknown[]) => stderr.push(String(a.join(" ")));
+  try {
+    await fn({ input: {}, signal, done: (c) => { exit = c; } });
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
 
-  RESULTS.push({ name, exit, stdout: stdout.join("\n"), stderr: stderr.join("\n") });
+  const ok = opts.expectFailure ? exit !== 0 : exit === 0;
+  RESULTS.push({ name, exit, stdout: stdout.join("\n"), stderr: stderr.join("\n"), ok });
 }
 
 async function main() {
   console.log("=== Task Runner Test Suite ===\n");
 
   // ls
-  await run("ls(fixture/1)", (ctx) =>
-    lsRunWith({ ...ctx, input: { filepath: "fixture/1" } }),
+  await run("ls(tests/1)", (ctx) =>
+    lsRunWith({ ...ctx, input: { filepath: "tests/1" } }),
   );
   await run("ls(missing dir)", (ctx) =>
     lsRunWith({ ...ctx, input: { filepath: "/tmp/does-not-exist-xyz" } }),
-  );
+  { expectFailure: true });
 
   // cat
   await run("cat(normal file)", (ctx) =>
@@ -51,7 +66,7 @@ async function main() {
   );
   await run("cat(missing file)", (ctx) =>
     catRunWith({ ...ctx, input: { filepath: "/tmp/does-not-exist-xyz" } }),
-  );
+  { expectFailure: true });
   await run("cat(limit 2)", (ctx) =>
     catRunWith({ ...ctx, input: { filepath: "tests/cat/normal-input.txt", limit: 2 } }),
   );
@@ -62,7 +77,7 @@ async function main() {
   );
   await run("sha256(missing file)", (ctx) =>
     shaRunWith({ ...ctx, input: { filepath: "/tmp/does-not-exist-xyz" } }),
-  );
+  { expectFailure: true });
 
   // env
   await run("env(values true)", (ctx) =>
@@ -78,29 +93,34 @@ async function main() {
     envRunWith({ ...ctx, input: {} }),
   );
 
-  // minfo (skipped if mediainfo not available)
-  try {
-    await run("minfo(fixture/1/1.srt)", (ctx) =>
-      minfoRunWith({ ...ctx, input: { filepath: "fixture/1/1.srt" } }),
+  // minfo (skipped if mediainfo is not available)
+  if (Bun.which("mediainfo")) {
+    await run("minfo(tests/1/1.mp4)", (ctx) =>
+      minfoRunWith({ ...ctx, input: { filepath: "tests/1/1.mp4" } }),
     );
-  } catch {
-    console.log("minfo: skipped (mediainfo not available or failed)");
+  } else {
+    console.log("minfo: skipped (mediainfo not available)");
   }
 
   // Summary
   console.log("\n=== Summary ===");
   for (const r of RESULTS) {
-    const status = r.exit === 0 ? "OK" : r.exit === 1 ? "FAILED" : `EXIT:${r.exit}`;
+    const status = r.ok ? "OK" : `FAILED (exit ${r.exit})`;
     console.log(`${status}  ${r.name}`);
-    if (r.stdout) console.log(`  stdout:\n${r.stdout.split("\n").map(l => "    " + l).join("\n")}`);
-    if (r.stderr) console.log(`  stderr:\n${r.stderr.split("\n").map(l => "    " + l).join("\n")}`);
+    if (!r.ok && r.stdout) {
+      console.log(`  stdout:\n${r.stdout.split("\n").map(l => "    " + l).join("\n")}`);
+    }
+    if (!r.ok && r.stderr) {
+      console.log(`  stderr:\n${r.stderr.split("\n").map(l => "    " + l).join("\n")}`);
+    }
   }
 
-  const failed = RESULTS.filter((r) => r.exit !== 0);
+  const failed = RESULTS.filter((r) => !r.ok);
   console.log(`\n${RESULTS.length} tests run, ${failed.length} failed`);
   if (failed.length > 0) {
     console.log("Failed tests:");
     for (const r of failed) console.log(`  - ${r.name} (exit ${r.exit})`);
+    process.exit(1);
   }
 }
 

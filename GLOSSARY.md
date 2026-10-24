@@ -8,7 +8,7 @@ A self-describing definition discovered from a search path: a folder with an ent
 
 ## Task instance
 
-One enqueued execution of a task. Carries normalized input, attempt number, state (`PENDING`, `RUNNING`, `SUCCESS`, `FAILED`), timings, exit code, failure reason, and log path. Referred to by its numeric id.
+One enqueued execution of a task. Carries normalized input, attempt number, state (`PENDING`, `RUNNING`, `SUCCESS`, `FAILED`), timings, exit code, failure reason, and log path. Referred to by its numeric id. The attempt number is also the completion fence: a finish applies only to the running attempt it was claimed from.
 
 ## Queue
 
@@ -20,11 +20,19 @@ The rules that move task instances and their queues between states: enqueue, cla
 
 ## Queue lifecycle
 
-The queue-state half of the task lifecycle: `IDLE` ⇄ `PROCESSING`, `PROCESSING` → `STOPPED`, `STOPPED` → `PROCESSING`, and automatic drain when the last running instance finishes.
+The queue-state half of the task lifecycle: `IDLE` ⇄ `PROCESSING`, `IDLE`/`PROCESSING` → `STOPPED`, `STOPPED` → `PROCESSING` or `IDLE`, and automatic drain when the last running instance finishes.
+
+## Intent operation
+
+A command that names the desired queue state rather than a specific edge: `start` targets `PROCESSING` when there is work and `IDLE` when there is none; `stop` targets `STOPPED`. Repeating an intent in its target state is a no-op, not an error.
 
 ## Claim
 
-A runnable task instance handed from the lifecycle to the runner: instance id, task id, entrypoint, timeout, parsed input, and log path. A claim means the instance has already moved to `RUNNING` inside the lifecycle transaction.
+A runnable task instance handed from the lifecycle to the runner: instance id, attempt, task id, entrypoint, timeout, parsed input, and log path. A claim means the instance has already moved to `RUNNING` inside the lifecycle transaction.
+
+## Claim token
+
+The pair `{ instanceId, attempt }` used to fence a completion. `finishRun` applies only when the token matches a `RUNNING` instance at that attempt; a stale token is a no-op. The runner also keys its `AbortController`s by this pair.
 
 ## Event sink
 

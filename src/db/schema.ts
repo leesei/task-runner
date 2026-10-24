@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS control_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL,            -- abort, reload
   queue_id TEXT,
-  instance_ids TEXT,             -- JSON array for abort requests
+  instance_ids TEXT,             -- JSON array of instance ids (legacy)
+  claim_tokens TEXT,             -- JSON array of {instanceId, attempt}
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   consumed_at TEXT
 );
@@ -118,6 +119,7 @@ export interface ControlRequestRow {
   kind: ControlRequestKind;
   queue_id: string | null;
   instance_ids: string | null;
+  claim_tokens: string | null;
   created_at: string;
   consumed_at: string | null;
 }

@@ -6,8 +6,8 @@
  * leaves the queue STOPPED. No HTTP API call is made.
  */
 
-import { abortQueue } from "../../core/service.ts";
-import { closeDatabase, openDatabase, resolveDataDir } from "../../db/database.ts";
+import { CoreError } from "../../core/service.ts";
+import { openCliCore } from "../core.ts";
 
 export async function commandAbort(
   dataDir: string,
@@ -25,27 +25,29 @@ export async function commandAbort(
     return 1;
   }
 
-  const dbConfig = resolveDataDir(dataDir);
-  let db;
+  let cli;
   try {
-    db = openDatabase(dbConfig.dbPath);
+    cli = openCliCore(dataDir);
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
   try {
-    const result = await abortQueue(db, queueId);
-    if (!result.success) {
-      console.error(result.message);
-      return 1;
-    }
-    console.log(result.message);
-    if (result.runningIds?.length) {
-      console.log(`Returned ${result.runningIds.length} instance(s) to PENDING`);
-    }
+    const result = await cli.core.abort(queueId);
+    console.log(
+      `Queue ${queueId} aborted: ${result.cancelled.length} instance(s) returned to PENDING`,
+    );
+    console.log(`Queue ${queueId} is ${result.queueState}`);
     return 0;
+  } catch (err: any) {
+    if (err instanceof CoreError && err.code === "QUEUE_NOT_FOUND") {
+      console.error(err.message);
+      return 2;
+    }
+    console.error(err.message);
+    return 1;
   } finally {
-    closeDatabase(db);
+    cli.close();
   }
 }

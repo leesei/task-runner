@@ -30,30 +30,65 @@ export function prettyBps(bps: string | number): string {
   return `${parseFloat((bytesN / Math.pow(k, i)).toFixed(2))}${sizes[i]}ps`;
 }
 
-export const getMediainfo = async (filepath: string) => {
-  const { stdout, stderr, exitCode } =
-    await $`mediainfo --Output=JSON "${filepath}"`.nothrow().quiet();
-  if (exitCode !== 0) {
-    console.error(`Error processing file: ${filepath}`);
-    console.error(stderr);
-    return null;
+export interface MediaOptions {
+  /** Override the PATH used to locate the mediainfo binary (for tests). */
+  path?: string;
+}
+
+export class MediainfoUnavailableError extends Error {
+  constructor() {
+    super(
+      "mediainfo CLI not found; install mediainfo (https://mediaarea.net/en/MediaInfo) to use the minfo task",
+    );
+    this.name = "MediainfoUnavailableError";
+  }
+}
+
+export function findMediainfo(options?: MediaOptions): string | null {
+  return options?.path !== undefined
+    ? Bun.which("mediainfo", { PATH: options.path })
+    : Bun.which("mediainfo");
+}
+
+export const getMediainfo = async (
+  filepath: string,
+  options?: MediaOptions,
+) => {
+  if (!findMediainfo(options)) {
+    throw new MediainfoUnavailableError();
   }
 
-  const minfo = JSON.parse(stdout.toString()) as Record<string, any>;
-  const vtrack = minfo["media"]["track"].find(
-    (track: any) => track["@type"] === "Video",
-  );
+  const { stdout, stderr, exitCode } =
+    await $`mediainfo --Output=JSON ${filepath}`.nothrow().quiet();
+  if (exitCode !== 0) {
+    const detail = stderr.toString().trim();
+    throw new Error(
+      `mediainfo failed for ${filepath}${detail ? `: ${detail}` : ` (exit ${exitCode})`}`,
+    );
+  }
+
+  let minfo: Record<string, any>;
+  try {
+    minfo = JSON.parse(stdout.toString()) as Record<string, any>;
+  } catch {
+    throw new Error(`mediainfo returned invalid JSON for ${filepath}`);
+  }
+
+  const tracks = minfo?.["media"]?.["track"];
+  if (!Array.isArray(tracks)) {
+    throw new Error(`mediainfo returned no media tracks for ${filepath}`);
+  }
+
+  const vtrack = tracks.find((track: any) => track["@type"] === "Video");
   if (vtrack) {
     if (!vtrack["BitRate"]) {
       vtrack["BitRate"] = vtrack["BitRate_Maximum"];
     }
   }
-  const atrack = minfo["media"]["track"].find(
-    (track: any) => track["@type"] === "Audio",
-  );
+  const atrack = tracks.find((track: any) => track["@type"] === "Audio");
   if (atrack) {
     if (!atrack["BitRate"]) {
-      atrack["BitRate"] = vtrack["BitRate_Nominal"];
+      atrack["BitRate"] = vtrack?.["BitRate_Nominal"];
     }
   }
 

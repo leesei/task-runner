@@ -4,9 +4,16 @@
  * Starts the HTTP server, writes the descriptor, and waits for shutdown.
  * Serves the REST API and dashboard via Bun.serve.
  */
-import { resolveDataDir, openDatabase, closeDatabase, bootstrapDataDir, configureDatabase } from "../../db/database.ts";
-import { reloadTasks } from "../../core/service.ts";
-import { autostartQueuesOnBoot } from "../../runner/queue-state.ts";
+import {
+  resolveDataDir,
+  openDatabase,
+  closeDatabase,
+  bootstrapDataDir,
+  configureDatabase,
+} from "../../db/database.ts";
+import { createLifecycle } from "../../core/lifecycle.ts";
+import { createEventBus } from "../../core/events.ts";
+import { createCore } from "../../core/service.ts";
 import { createRunner } from "../../runner/runner.ts";
 import { installConsoleInterception } from "../../runner/execution.ts";
 import { createApi } from "../../api/index.ts";
@@ -38,30 +45,47 @@ export async function commandDaemon(
     return 1;
   }
 
+  const events = createEventBus();
+  const lifecycle = createLifecycle({
+    db,
+    events,
+    logDir: dbConfig.logDir,
+  });
+  const core = createCore({
+    db,
+    lifecycle,
+    projectRoot,
+    dataDir,
+  });
+
   // Discover and load tasks from the project root, not the process cwd:
   // the CLI may have been started from a different directory.
   const cwd = projectRoot;
-  const { loaded, warnings } = reloadTasks(db, cwd, dataDir);
+  const { loaded, warnings } = core.reload();
   console.log(`Loaded ${loaded} task(s)`);
   for (const warning of warnings) {
     console.warn(`Warning: ${warning}`);
   }
 
-  // Autostart queues (STOPPED stay STOPPED, others enter PROCESSING)
-  const { started, stayedStopped } = autostartQueuesOnBoot(db);
+  // Reset abandoned attempts, keep STOPPED queues stopped, autostart the rest.
+  const { reset, started, stayedStopped } = core.recoverOnBoot();
+  if (reset > 0) {
+    console.log(`Crash recovery: reset ${reset} RUNNING instance(s) to PENDING`);
+  }
   console.log(`Autostart: ${started} queue(s) processing, ${stayedStopped} stayed stopped`);
 
   // Install console interception for log capture
   installConsoleInterception();
 
   // Create the API router (after tasks are loaded so reload works correctly)
-  const apiRouter = createApi({ db, dataDir, cwd });
+  const apiRouter = createApi({ core, events, dataDir, cwd });
 
   // Start the runner loop
   const runner = createRunner({
-    dataDir,
+    db,
+    lifecycle,
     onReload: () => {
-      const result = reloadTasks(db, projectRoot, dataDir);
+      const result = core.reload();
       console.log(`Reloaded ${result.loaded} task(s)`);
       for (const warning of result.warnings) {
         console.warn(`Warning: ${warning}`);
@@ -70,8 +94,7 @@ export async function commandDaemon(
   });
   console.log("Runner loop started");
 
-  // Run runner in background
-  runner.runContinuous(db).catch(err => {
+  runner.runContinuous().catch((err) => {
     console.error("Runner loop error:", err);
   });
 
@@ -83,12 +106,10 @@ export async function commandDaemon(
     server = Bun.serve({
       port,
       fetch(req) {
-        // Serve API under /api/*, dashboard at / and /*
         const url = new URL(req.url);
         if (url.pathname.startsWith("/api/") || url.pathname === "/api") {
           return apiRouter(req);
         }
-        // Dashboard placeholder
         return new Response(" tq dashboard (not yet implemented) ", {
           status: 200,
           headers: { "Content-Type": "text/html" },
@@ -128,7 +149,6 @@ export async function commandDaemon(
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  // Wait until aborted
   await new Promise<void>((resolve) => {
     controller.signal.addEventListener("abort", () => {
       resolve();
