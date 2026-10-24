@@ -4,16 +4,20 @@
 
 **Blocked by:** 09, 18
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Daemon writes descriptor file (pid, port, dataDir, startedAt) on start
-- [ ] Daemon removes descriptor on clean shutdown (SIGINT/SIGTERM)
-- [ ] CLI reads descriptor and checks pid liveness without HTTP
-- [ ] Daemon polls SQLite for newly PENDING instances at ~1 second interval
-- [ ] Daemon consumes pending abort/reload control requests on its poll tick
-- [ ] Offline enqueues (via direct SQLite) are picked up promptly once daemon starts
-- [ ] Daemon main loop: discover tasks → create queues → poll → drain → handle control
-- [ ] RUNNING instances left at restart are reset to PENDING
-- [ ] STOPPED queues stay STOPPED across restart
-- [ ] All other queues enter PROCESSING on restart (autostart)
-- [ ] Port conflict on start is a clear error, not a silent change
+- [x] Daemon removes descriptor on clean shutdown (SIGINT/SIGTERM)
+- [x] CLI reads descriptor and checks pid liveness without HTTP
+- [x] Daemon polls SQLite for newly PENDING instances at ~1 second interval
+- [x] Daemon consumes pending abort/reload control requests on its poll tick
+- [x] Offline enqueues (via direct SQLite) are picked up promptly once daemon starts
+- [x] Daemon main loop: discover tasks → create queues → poll → drain → handle control
+- [x] RUNNING instances left at restart are reset to PENDING
+- [x] STOPPED queues stay STOPPED across restart
+- [x] All other queues enter PROCESSING on restart (autostart)
+- [x] Port conflict on start is a clear error, not a silent change
+
+## Evidence
+- All tests pass: `bun test` (112 pass, 0 fail, 434 expect() calls across 14 files)
+- Descriptor written/removed, pid-based liveness, recovery/autostart behavior implemented as specified.
