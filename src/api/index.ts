@@ -6,6 +6,11 @@
  * queue or instance rules. SSE subscribes to the injected event bus.
  */
 
+import { CoreError, type Core } from "../core/service.ts";
+import type { EventBus, LifecycleEvent } from "../core/events.ts";
+import type { InstanceState } from "../db/schema.ts";
+import { readLogFile } from "../db/logs.ts";
+
 
 
 export interface ApiError {
@@ -80,8 +85,27 @@ export function createApi(h: ApiHandlers) {
       descriptor = JSON.parse(raw);
     } catch {}
 
-
+    return json({
+      status: "ok",
+      pid: descriptor?.pid ?? process.pid,
+      port: descriptor?.port ?? null,
+      dataDir,
+      startedAt: descriptor?.startedAt ?? null,
     });
+  }
+
+  // ─── Queues ──────────────────────────────────────────────────────────────────
+
+  function handleQueues(): Response {
+    return json(core.listQueues());
+  }
+
+  function handleQueueDetail(queueId: string): Response {
+    const queue = core.getQueue(queueId);
+    if (!queue) {
+      return jsonError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`, 404);
+    }
+    return json(queue);
   }
 
   function handleQueueInstances(queueId: string, stateFilter?: string): Response {
@@ -102,7 +126,9 @@ export function createApi(h: ApiHandlers) {
       state = stateFilter as InstanceState;
     }
 
-
+    const instances = core.listInstances(queueId, state);
+    return json(
+      instances.map((instance) => ({
         id: instance.id,
         state: instance.state,
         exit_code: instance.exit_code,
@@ -117,10 +143,6 @@ export function createApi(h: ApiHandlers) {
     );
   }
 
-
-    });
-  }
-
   function handleInstanceLog(instanceId: number): Response {
     const log = core.readInstanceLog(instanceId);
     if (!log) {
@@ -131,6 +153,84 @@ export function createApi(h: ApiHandlers) {
 
   function handleReload(): Response {
 
+  }
+
+  function handleStartQueue(queueId: string): Response {
+    try {
+      const state = core.start(queueId);
+      return json({ success: true, state });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
+  }
+
+  function handleStopQueue(queueId: string): Response {
+    try {
+      const state = core.stop(queueId);
+      return json({ success: true, state });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
+  }
+
+  async function handleAbortQueue(queueId: string): Promise<Response> {
+    try {
+      const result = await core.abort(queueId);
+      return json({
+        success: true,
+        state: result.queueState,
+        returnedToPending: result.cancelled.map((token: any) => token.instanceId),
+      });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
+  }
+
+  function handleEnqueueInstance(body: { task: string; input: unknown }): Response {
+    try {
+      const result = core.enqueue(body.task, body.input);
+      return json({ id: result.id, task: body.task, input: body.input, createdAt: result.createdAt });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
+  }
+
+  function handleInstanceDetail(instanceId: number): Response {
+    const instance = core.getInstance(instanceId);
+    if (!instance) {
+      return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
+    }
+    return json({
+      id: instance.id,
+      task_id: instance.task_id,
+      state: instance.state,
+      exit_code: instance.exit_code,
+      failure_reason: instance.failure_reason,
+      attempt: instance.attempt,
+      duration_ms: instance.duration_ms,
+      created_at: instance.created_at,
+      started_at: instance.started_at,
+      ended_at: instance.ended_at,
+      input: JSON.parse(instance.input),
+    });
+  }
+
+  function handleReload(): Response {
+    try {
+      const { loaded, warnings } = core.reload();
+      return json({ reloaded: loaded, warnings });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
+  }
+
+  function handleClearQueue(queueId: string, all: boolean): Response {
+    try {
+      const result = core.clear(queueId, all);
+      return json({ success: true, deleted: result.deleted, queueId });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
   }
 
   async function route(req: Request): Promise<Response> {

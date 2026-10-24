@@ -34,17 +34,30 @@ export function parseArgs(args: string[]): ParsedArgs {
     if (arg === "--help" || arg === "-h") {
       flags["help"] = true;
       i++;
+    } else if (arg === "-v") {
+      flags["verbose"] = (typeof flags["verbose"] === "number" ? flags["verbose"] + 1 : 1);
+      i++;
     } else if (arg.startsWith("--")) {
       const eqIdx = arg.indexOf("=");
       if (eqIdx >= 0) {
         // --key=value
         const key = arg.slice(2, eqIdx);
+        if (key === "verbose") {
+          flags["verbose"] = (typeof flags["verbose"] === "number" ? flags["verbose"] + 1 : 1);
+          i++;
+          continue;
+        }
         const value = arg.slice(eqIdx + 1);
         flags[key] = value;
         i++;
       } else {
         // --key (possibly followed by value as next arg)
         const key = arg.slice(2);
+        if (key === "verbose") {
+          flags["verbose"] = (typeof flags["verbose"] === "number" ? flags["verbose"] + 1 : 1);
+          i++;
+          continue;
+        }
         const next = args[i + 1];
         if (next && !next.startsWith("--")) {
           // --key value
@@ -114,6 +127,7 @@ Usage:
 Global flags:
   --data-dir <path>   Data directory (default: <project>/.task-runner, or TQ_DATA_DIR)
   --port <port>       HTTP port (default: 3000, or TQ_PORT)
+  -v, --verbose       Verbose output (repeatable)
   --help, -h          Show this help
 
 Config flags:

@@ -97,6 +97,7 @@ export async function main(args: string[]): Promise<number> {
         dataDir,
         parsed.positional.slice(1),
         parsed.flags,
+        process.cwd(),
       );
     case "start":
       return await commandStart(

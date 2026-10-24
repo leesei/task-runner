@@ -16,10 +16,17 @@ import { buildContext, UsageError } from "../context.ts";
 
 const ADD_USAGE = "Usage: tq add <task> [context]";
 
+function getVerboseLevel(flags: Record<string, string | true>): number {
+  const v = flags["verbose"];
+  if (typeof v === "number") return v;
+  if (v === true) return 1;
+  return 0;
+}
+
 export async function commandAdd(
   dataDir: string,
   args: string[],
-  _flags: Record<string, string | true>,
+  flags: Record<string, string | true>,
   cwd: string = process.cwd(),
 ): Promise<number> {
   if (args.length === 0) {
@@ -28,6 +35,7 @@ export async function commandAdd(
   }
 
   const taskId = args[0]!;
+  const verbose = getVerboseLevel(flags);
 
   let cli;
   try {
@@ -39,6 +47,16 @@ export async function commandAdd(
 
   try {
     const schema = cli.core.getTaskInputSchema(taskId);
+
+    if (verbose >= 1) {
+      console.error(`Resolved task: ${taskId}`);
+      console.error(`Resolved data directory: ${dataDir}`);
+      console.error(`Project root: ${cwd}`);
+    }
+    if (verbose >= 2) {
+      console.error(`Database path: ${cli.config.dbPath}`);
+      console.error(`Schema: ${schema ? JSON.stringify(schema) : "null"}`);
+    }
 
     let input: unknown;
     try {
@@ -52,9 +70,14 @@ export async function commandAdd(
       throw err;
     }
 
-    const { id } = cli.core.enqueue(taskId, input);
-    console.log(`Enqueued instance ${id} on task ${taskId}`);
-    console.log(`Input: ${JSON.stringify(input)}`);
+    if (verbose >= 1) {
+      console.error(`Normalized context: ${JSON.stringify(input)}`);
+    }
+
+    const { id, createdAt } = cli.core.enqueue(taskId, input);
+    console.log(`Enqueued instance ${id} at ${createdAt}`);
+    console.log(`Task: ${taskId}`);
+    console.log(`Context: ${JSON.stringify(input)}`);
     return 0;
   } catch (err: any) {
     if (err instanceof CoreError && err.code === "TASK_NOT_FOUND") {
