@@ -6,32 +6,7 @@
  * queue or instance rules. SSE subscribes to the injected event bus.
  */
 
-<<<<<<< HEAD
-import type { DB } from "../db/database.ts";
-import { getInstance, getInstancesByQueue, getQueue } from "../db/queries.ts";
-import { readLogFile } from "../db/logs.ts";
-import {
-  abortQueue,
-  clearQueue,
-  CoreError,
-  enqueueTask,
-  getQueueSummary,
-  listQueues,
-  listTasks,
-  readInstanceLog,
-  reloadTasks,
-  startQueue,
-  stopQueue,
-} from "../core/service.ts";
-import type { QueueState, InstanceState } from "../db/schema.ts";
 
-// ─── Structured errors ──────────────────────────────────────────────────────────
-=======
-import { CoreError, type Core } from "../core/service.ts";
-import type { EventBus, LifecycleEvent } from "../core/events.ts";
-import type { InstanceState } from "../db/schema.ts";
-import { readLogFile } from "../db/logs.ts";
->>>>>>> feat/task-runner-spec
 
 export interface ApiError {
   code: string;
@@ -105,42 +80,7 @@ export function createApi(h: ApiHandlers) {
       descriptor = JSON.parse(raw);
     } catch {}
 
-<<<<<<< HEAD
-    return new Response(
-      JSON.stringify({
-        status: "ok",
-        pid: descriptor?.pid ?? process.pid,
-        port: descriptor?.port ?? null,
-        dataDir,
-        startedAt: descriptor?.startedAt ?? null,
-      }),
-      { headers: { "Content-Type": "application/json" } },
-    );
-  }
 
-  // ─── Queues ──────────────────────────────────────────────────────────────────
-
-  function handleQueues(): Response {
-    return new Response(JSON.stringify(listQueues(db)), {
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  function handleQueueDetail(queueId: string): Response {
-    const queue = getQueueSummary(db, queueId);
-    if (!queue) {
-      return jsonError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`, 404);
-    }
-    return new Response(JSON.stringify(queue), {
-      headers: { "Content-Type": "application/json" },
-=======
-    return json({
-      status: "ok",
-      pid: descriptor?.pid ?? process.pid,
-      port: descriptor?.port ?? null,
-      dataDir,
-      startedAt: descriptor?.startedAt ?? null,
->>>>>>> feat/task-runner-spec
     });
   }
 
@@ -162,121 +102,7 @@ export function createApi(h: ApiHandlers) {
       state = stateFilter as InstanceState;
     }
 
-<<<<<<< HEAD
-    return new Response(
-      JSON.stringify(
-        instances.map(i => ({
-          id: i.id,
-          state: i.state,
-          exit_code: i.exit_code,
-          failure_reason: i.failure_reason,
-          attempt: i.attempt,
-          duration_ms: i.duration_ms,
-          created_at: i.created_at,
-          started_at: i.started_at,
-          ended_at: i.ended_at,
-          input: JSON.parse(i.input),
-        })),
-      ),
-      { headers: { "Content-Type": "application/json" } },
-    );
-  }
 
-  // ─── Queue control ───────────────────────────────────────────────────────────
-
-  function handleStartQueue(queueId: string): Response {
-    const result = startQueue(db, queueId);
-    if (!result.success) {
-      if (result.message.includes("not found")) {
-        return jsonError("QUEUE_NOT_FOUND", result.message, 404);
-      }
-      return jsonError("INVALID_TRANSITION", result.message, 409);
-    }
-    emitQueueStateChanged(queueId, "PROCESSING");
-    return new Response(
-      JSON.stringify({ success: true, message: result.message, state: result.queueState }),
-      { headers: { "Content-Type": "application/json" } },
-    );
-  }
-
-  function handleStopQueue(queueId: string): Response {
-    const result = stopQueue(db, queueId);
-    if (!result.success) {
-      if (result.message.includes("not found")) {
-        return jsonError("QUEUE_NOT_FOUND", result.message, 404);
-      }
-      return jsonError("INVALID_TRANSITION", result.message, 409);
-    }
-    emitQueueStateChanged(queueId, "STOPPED");
-    return new Response(
-      JSON.stringify({ success: true, message: result.message, state: result.queueState }),
-      { headers: { "Content-Type": "application/json" } },
-    );
-  }
-
-  async function handleAbortQueue(queueId: string): Promise<Response> {
-    const result = await abortQueue(db, queueId);
-    if (!result.success) {
-      if (result.message.includes("not found")) {
-        return jsonError("QUEUE_NOT_FOUND", result.message, 404);
-      }
-      if (result.message.includes("Timed out")) {
-        return jsonError("CONTROL_TIMEOUT", result.message, 504);
-      }
-      return jsonError("INVALID_TRANSITION", result.message, 409);
-    }
-    emitQueueStateChanged(queueId, "STOPPED");
-    for (const id of result.runningIds ?? []) {
-      emitInstanceStateChanged(id, "PENDING");
-    }
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: result.message,
-        state: result.queueState,
-        returnedToPending: result.runningIds,
-      }),
-      { headers: { "Content-Type": "application/json" } },
-    );
-  }
-
-  // ─── Tasks ───────────────────────────────────────────────────────────────────
-
-  function handleTasks(): Response {
-    return new Response(JSON.stringify(listTasks(db)), {
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  // ─── Instances ───────────────────────────────────────────────────────────────
-
-  function handleEnqueueInstance(body: { task: string; input: unknown }): Response {
-    try {
-      const id = enqueueTask(db, body.task, body.input);
-      return new Response(
-        JSON.stringify({ id, task: body.task, input: body.input }),
-        { headers: { "Content-Type": "application/json" } },
-      );
-    } catch (err) {
-      if (err instanceof CoreError && err.code === "TASK_NOT_FOUND") {
-        return jsonError(err.code, err.message, 404);
-      }
-      throw err;
-    }
-  }
-
-  function handleInstanceDetail(instanceId: number): Response {
-    const instance = getInstance(db, instanceId);
-    if (!instance) {
-      return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
-    }
-    return new Response(
-      JSON.stringify({
-=======
-    const instances = core.listInstances(queueId, state);
-    return json(
-      instances.map((instance) => ({
->>>>>>> feat/task-runner-spec
         id: instance.id,
         state: instance.state,
         exit_code: instance.exit_code,
@@ -291,73 +117,7 @@ export function createApi(h: ApiHandlers) {
     );
   }
 
-<<<<<<< HEAD
-  function handleInstanceLog(instanceId: number): Response {
-    const log = readInstanceLog(db, instanceId);
-    if (!log) {
-      return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
-    }
-    return new Response(JSON.stringify(log.records), {
-      headers: { "Content-Type": "application/json" },
-=======
-  function handleStartQueue(queueId: string): Response {
-    try {
-      const state = core.start(queueId);
-      return json({ success: true, state });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
 
-  function handleStopQueue(queueId: string): Response {
-    try {
-      const state = core.stop(queueId);
-      return json({ success: true, state });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  async function handleAbortQueue(queueId: string): Promise<Response> {
-    try {
-      const result = await core.abort(queueId);
-      return json({
-        success: true,
-        state: result.queueState,
-        returnedToPending: result.cancelled.map((token) => token.instanceId),
-      });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  function handleEnqueueInstance(body: { task: string; input: unknown }): Response {
-    try {
-      const result = core.enqueue(body.task, body.input);
-      return json({ id: result.id, task: body.task, input: body.input, createdAt: result.createdAt });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  function handleInstanceDetail(instanceId: number): Response {
-    const instance = core.getInstance(instanceId);
-    if (!instance) {
-      return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
-    }
-    return json({
-      id: instance.id,
-      task_id: instance.task_id,
-      state: instance.state,
-      exit_code: instance.exit_code,
-      failure_reason: instance.failure_reason,
-      attempt: instance.attempt,
-      duration_ms: instance.duration_ms,
-      created_at: instance.created_at,
-      started_at: instance.started_at,
-      ended_at: instance.ended_at,
-      input: JSON.parse(instance.input),
->>>>>>> feat/task-runner-spec
     });
   }
 
@@ -370,47 +130,7 @@ export function createApi(h: ApiHandlers) {
   }
 
   function handleReload(): Response {
-<<<<<<< HEAD
-    const { loaded, warnings } = reloadTasks(db, cwd, dataDir);
-    return new Response(
-      JSON.stringify({ reloaded: loaded, warnings }),
-      { headers: { "Content-Type": "application/json" } },
-    );
-  }
 
-  function handleClearQueue(queueId: string, all: boolean): Response {
-    const result = clearQueue(db, queueId, all);
-    if (!result.success) {
-      if (result.message.includes("not found")) {
-        return jsonError("QUEUE_NOT_FOUND", result.message, 404);
-      }
-      return new Response(
-        JSON.stringify({
-          success: false,
-          code: "CLEAR_REFUSED_RUNNING",
-          message: result.message,
-          runningIds: result.runningIds ?? [],
-        }),
-        { status: 409, headers: { "Content-Type": "application/json" } },
-      );
-    }
-    return new Response(
-      JSON.stringify({ success: true, deleted: result.deletedCount ?? 0, queueId }),
-      { headers: { "Content-Type": "application/json" } },
-    );
-=======
-    const { loaded, warnings } = core.reload();
-    return json({ reloaded: loaded, warnings });
-  }
-
-  function handleClearQueue(queueId: string, all: boolean): Response {
-    try {
-      const result = core.clear(queueId, all);
-      return json({ success: true, deleted: result.deleted, queueId });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
->>>>>>> feat/task-runner-spec
   }
 
   async function route(req: Request): Promise<Response> {

@@ -1,51 +1,52 @@
 /**
  * Core task-runner operations.
  *
- * The core is transport-independent: the CLI calls these functions in-process
- * and the daemon's HTTP API wraps the same functions. It must not fetch, print
- * CLI output, or build HTTP responses.
+ * The core is transport-independent: the CLI calls these operations in-process
+ * and the daemon's HTTP API wraps the same operations. It must not fetch,
+ * print CLI output, or build HTTP responses.
+ *
+ * The lifecycle is private to core; adapters never import `db/queries` for
+ * queue or instance state. The one documented exception is the runner's
+ * control-request channel.
  */
 
 import type { DB } from "../db/database.ts";
 import {
-  controlClear,
-  controlStart,
-  controlStop,
-} from "../control/queue-control.ts";
-import type { ControlResult } from "../control/queue-control.ts";
-import {
-  ensureQueue,
   getAllQueues,
   getAllTasks,
   getControlRequest,
   getInstance,
+  getInstancesByQueue,
   getQueue,
   getQueueCounts,
   getRunningInstances,
   getTask,
   insertControlRequest,
-  insertInstance,
-  updateQueueState,
 } from "../db/queries.ts";
-import type { InstanceRow } from "../db/schema.ts";
+import type { ControlToken } from "../db/queries.ts";
+import type {
+  InstanceRow,
+  InstanceState,
+  QueueState,
+  TaskRow,
+} from "../db/schema.ts";
 import { readLogFile, type LogRecord } from "../db/logs.ts";
-import { ensureQueuesForTasks } from "../runner/queue-state.ts";
+import type { Lifecycle } from "./lifecycle.ts";
+import { CoreError } from "./errors.ts";
 import { getPackageLocations } from "../tasks/lockfile.ts";
 import { loadAllTasks } from "../tasks/discovery.ts";
+import {
+  parseSchema,
+  validateContext,
+  type ValidationIssue,
+} from "./validation.ts";
 
-export class CoreError extends Error {
-  readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "CoreError";
-    this.code = code;
-  }
-}
+export { CoreError };
+export type { ValidationIssue };
 
 export interface QueueSummary {
   id: string;
-  state: string;
+  state: QueueState;
   concurrency: number;
   running: number;
   pending: number;
@@ -68,11 +69,69 @@ export interface InstanceLog {
   records: LogRecord[];
 }
 
-const CONTROL_TIMEOUT_MS = 5000;
+export interface EnqueueResult {
+  id: number;
+  createdAt: string;
+}
 
-function waitForControlRequest(db: DB, requestId: number): Promise<boolean> {
+export interface AbortOutcome {
+  queueId: string;
+  queueState: QueueState;
+  /** Tokens that were RUNNING and are now PENDING at attempt + 1. */
+  cancelled: ControlToken[];
+}
+
+export interface ClearOutcome {
+  deleted: number;
+  logPaths: string[];
+}
+
+export interface ReloadResult {
+  loaded: number;
+  warnings: string[];
+}
+
+export interface Core {
+  enqueue(taskId: string, input: unknown): EnqueueResult;
+  getTaskInputSchema(taskId: string): object | null;
+
+  listQueues(): QueueSummary[];
+  getQueue(queueId: string): QueueSummary | null;
+  listTasks(): TaskSummary[];
+  listTaskDefinitions(): TaskRow[];
+  listInstances(queueId: string, state?: InstanceState): InstanceRow[];
+  getInstance(instanceId: number): InstanceRow | null;
+  readInstanceLog(instanceId: number): InstanceLog | null;
+
+  start(queueId: string): QueueState;
+  stop(queueId: string): QueueState;
+  abort(queueId: string): Promise<AbortOutcome>;
+  clear(queueId: string, all?: boolean): ClearOutcome;
+
+  reload(): ReloadResult;
+  syncQueues(): { created: number; updated: number };
+  recoverOnBoot(): { reset: number; started: number; stayedStopped: number };
+  requestReload(): Promise<boolean>;
+}
+
+export interface CoreConfig {
+  db: DB;
+  lifecycle: Lifecycle;
+  projectRoot: string;
+  dataDir: string;
+  /** Bounded wait for the daemon to consume a control request. */
+  controlTimeoutMs?: number;
+}
+
+const DEFAULT_CONTROL_TIMEOUT_MS = 5000;
+
+function waitForControlRequest(
+  db: DB,
+  requestId: number,
+  timeoutMs: number,
+): Promise<boolean> {
   return new Promise((resolve) => {
-    const deadline = Date.now() + CONTROL_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
     const poll = () => {
       const request = getControlRequest(db, requestId);
       if (request?.consumed_at) {
@@ -89,39 +148,7 @@ function waitForControlRequest(db: DB, requestId: number): Promise<boolean> {
   });
 }
 
-// ─── Tasks and instances ─────────────────────────────────────────────────────
-
-export function enqueueTask(db: DB, taskId: string, input: unknown): number {
-  const task = getTask(db, taskId);
-  if (!task) {
-    throw new CoreError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
-  }
-
-  ensureQueue(db, taskId, task.concurrency);
-  const queue = getQueue(db, taskId);
-  if (queue?.state === "IDLE") {
-    updateQueueState(db, taskId, "PROCESSING");
-  }
-
-  return insertInstance(db, taskId, JSON.stringify(input), null);
-}
-
-export function listQueues(db: DB): QueueSummary[] {
-  return getAllQueues(db).map((queue) => {
-    const counts = getQueueCounts(db, queue.id);
-    return {
-      id: queue.id,
-      state: queue.state,
-      concurrency: queue.concurrency,
-      running: counts.running,
-      pending: counts.pending,
-      succeeded: counts.succeeded,
-      failed: counts.failed,
-    };
-  });
-}
-
-export function getQueueSummary(db: DB, queueId: string): QueueSummary | null {
+function queueSummary(db: DB, queueId: string): QueueSummary | null {
   const queue = getQueue(db, queueId);
   if (!queue) return null;
   const counts = getQueueCounts(db, queueId);
@@ -136,86 +163,157 @@ export function getQueueSummary(db: DB, queueId: string): QueueSummary | null {
   };
 }
 
-export function listTasks(db: DB): TaskSummary[] {
-  return getAllTasks(db).map((task) => ({
-    id: task.id,
-    name: task.name,
-    description: task.description,
-    category: task.category,
-    concurrency: task.concurrency,
-    timeout_ms: task.timeout_ms,
-    has_schema: task.input_schema !== null,
-  }));
-}
+export function createCore(config: CoreConfig): Core {
+  const { db, lifecycle, projectRoot, dataDir } = config;
+  const controlTimeoutMs = config.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
 
-export function readInstanceLog(db: DB, instanceId: number): InstanceLog | null {
-  const instance = getInstance(db, instanceId);
-  if (!instance) return null;
-  const records = instance.log_path ? readLogFile(instance.log_path) : [];
-  return { instance, records };
-}
-
-// ─── Queue control ───────────────────────────────────────────────────────────
-
-export {
-  controlClear as clearQueue,
-  controlStart as startQueue,
-  controlStop as stopQueue,
-};
-
-/**
- * Abort is daemon-directed: running executions live in the daemon process, so
- * the core records a durable request and waits for the runner to consume it.
- */
-export async function abortQueue(
-  db: DB,
-  queueId: string,
-): Promise<ControlResult> {
-  const queue = getQueue(db, queueId);
-  if (!queue) {
-    return { success: false, message: `Queue not found: ${queueId}` };
-  }
-
-  const runningIds = getRunningInstances(db, queueId).map((i) => i.id);
-  const requestId = insertControlRequest(db, "abort", queueId, runningIds);
-
-  if (!(await waitForControlRequest(db, requestId))) {
-    return {
-      success: false,
-      message: `Timed out waiting for the daemon to process the abort request for ${queueId}`,
-      runningIds,
-    };
-  }
-
-  const counts = getQueueCounts(db, queueId);
   return {
-    success: true,
-    message: `Queue ${queueId} aborted: ${runningIds.length} instance(s) returned to PENDING`,
-    queueState: "STOPPED",
-    runningCount: counts.running,
-    pendingCount: counts.pending,
-    runningIds,
+    enqueue(taskId, input) {
+      const task = getTask(db, taskId);
+      if (!task) {
+        throw new CoreError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
+      }
+
+      // Validate before touching queue or instance state: a violation creates
+      // no instance. CLI and HTTP share this path, so they cannot disagree.
+      const { value, issues } = validateContext(task.input_schema, input);
+      if (issues.length > 0) {
+        throw new CoreError(
+          "INPUT_SCHEMA_VIOLATION",
+          `Context does not match the schema for ${taskId}`,
+          { issues },
+        );
+      }
+
+      return lifecycle.enqueue(taskId, value);
+    },
+
+    getTaskInputSchema(taskId) {
+      const task = getTask(db, taskId);
+      if (!task) {
+        throw new CoreError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
+      }
+      return parseSchema(task.input_schema);
+    },
+
+    listQueues() {
+      return getAllQueues(db).map((queue) => queueSummary(db, queue.id)!);
+    },
+
+    getQueue(queueId) {
+      return queueSummary(db, queueId);
+    },
+
+    listTasks() {
+      return getAllTasks(db).map((task) => ({
+        id: task.id,
+        name: task.name,
+        description: task.description,
+        category: task.category,
+        concurrency: task.concurrency,
+        timeout_ms: task.timeout_ms,
+        has_schema: task.input_schema !== null,
+      }));
+    },
+
+    listTaskDefinitions() {
+      return getAllTasks(db);
+    },
+
+    listInstances(queueId, state) {
+      const instances = getInstancesByQueue(db, queueId);
+      return state ? instances.filter((instance) => instance.state === state) : instances;
+    },
+
+    getInstance(instanceId) {
+      return getInstance(db, instanceId);
+    },
+
+    readInstanceLog(instanceId) {
+      const instance = getInstance(db, instanceId);
+      if (!instance) return null;
+      const records = instance.log_path ? readLogFile(instance.log_path) : [];
+      return { instance, records };
+    },
+
+    start(queueId) {
+      return lifecycle.start(queueId);
+    },
+
+    stop(queueId) {
+      return lifecycle.stop(queueId);
+    },
+
+    async abort(queueId) {
+      const queue = getQueue(db, queueId);
+      if (!queue) {
+        throw new CoreError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`);
+      }
+
+      const tokens: ControlToken[] = getRunningInstances(db, queueId).map(
+        (instance) => ({ instanceId: instance.id, attempt: instance.attempt }),
+      );
+      const requestId = insertControlRequest(db, "abort", queueId, tokens);
+
+      if (!(await waitForControlRequest(db, requestId, controlTimeoutMs))) {
+        throw new CoreError(
+          "CONTROL_TIMEOUT",
+          `Timed out waiting for the daemon to process the abort request for ${queueId}`,
+        );
+      }
+
+      const after = getQueue(db, queueId);
+      if (!after) {
+        throw new CoreError("QUEUE_NOT_FOUND", `Queue not found: ${queueId}`);
+      }
+
+      // A token was cancelled only if the instance is now PENDING at the next
+      // attempt. A stale request changes nothing, so this is empty.
+      const cancelled = tokens.filter((token) => {
+        const instance = getInstance(db, token.instanceId);
+        return (
+          instance !== null &&
+          instance.state === "PENDING" &&
+          instance.attempt === token.attempt + 1
+        );
+      });
+
+      return { queueId, queueState: after.state, cancelled };
+    },
+
+    clear(queueId, all = false) {
+      const result = lifecycle.clearQueue(queueId, { all });
+
+      // The lifecycle owns state, not files. Core removes the logs it returned
+      // best-effort; a missing file is not an error.
+      const fs = require("node:fs");
+      for (const logPath of result.logPaths) {
+        try {
+          fs.unlinkSync(logPath);
+        } catch {}
+      }
+
+      return { deleted: result.deleted, logPaths: result.logPaths };
+    },
+
+    reload() {
+      const packageLocations = getPackageLocations(dataDir);
+      const result = loadAllTasks(db, projectRoot, packageLocations);
+      lifecycle.syncQueues();
+      return result;
+    },
+
+    syncQueues() {
+      return lifecycle.syncQueues();
+    },
+
+    recoverOnBoot() {
+      return lifecycle.recoverOnBoot();
+    },
+
+    async requestReload() {
+      const requestId = insertControlRequest(db, "reload", null, []);
+      return waitForControlRequest(db, requestId, controlTimeoutMs);
+    },
   };
-}
-
-// ─── Discovery ───────────────────────────────────────────────────────────────
-
-export function reloadTasks(
-  db: DB,
-  projectRoot: string,
-  dataDir: string,
-): { loaded: number; warnings: string[] } {
-  const packageLocations = getPackageLocations(dataDir);
-  const result = loadAllTasks(db, projectRoot, packageLocations);
-  ensureQueuesForTasks(db);
-  return result;
-}
-
-/**
- * Ask a live daemon to refresh its in-memory task/runner state. Returns false
- * when no daemon consumes the request within the timeout.
- */
-export async function requestReload(db: DB): Promise<boolean> {
-  const requestId = insertControlRequest(db, "reload", null, []);
-  return waitForControlRequest(db, requestId);
 }
