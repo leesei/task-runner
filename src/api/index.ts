@@ -152,7 +152,12 @@ export function createApi(h: ApiHandlers) {
   }
 
   function handleReload(): Response {
-
+    try {
+      const { loaded, warnings } = core.reload();
+      return json({ reloaded: loaded, warnings });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
   }
 
   function handleStartQueue(queueId: string): Response {

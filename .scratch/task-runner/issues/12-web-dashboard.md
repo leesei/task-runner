@@ -4,13 +4,13 @@
 
 **Blocked by:** 18
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Dashboard served at `GET /` by the daemon
-- [ ] Queue table: id, name, category, state, concurrency, running, pending, succeeded, failed
-- [ ] Instance table per queue: id, state, exit code, duration, enqueue time
-- [ ] Instance view: merged stdout/stderr, tails live
-- [ ] Dashboard updates live via SSE event stream
-- [ ] Mid-run page load gets current state immediately (no reload required)
-- [ ] Dashboard is read-only in v1: no start/stop/abort buttons
-- [ ] Dashboard assets served from the daemon process (inline HTML/JS or static files)
+- [x] Dashboard served at `GET /` by the daemon
+- [x] Queue table: id, name, category, state, concurrency, running, pending, succeeded, failed
+- [x] Instance table per queue: id, state, exit code, duration, enqueue time
+- [x] Instance view: merged stdout/stderr, tails live
+- [x] Dashboard updates live via SSE event stream
+- [x] Mid-run page load gets current state immediately (no reload required)
+- [x] Dashboard is read-only in v1: no start/stop/abort buttons
+- [x] Dashboard assets served from the daemon process (inline HTML/JS or static files)
