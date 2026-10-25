@@ -1,11 +1,7 @@
 # Doc Layout
 
-<<<<<<< HEAD
-This repo uses the default single-context layout.
-=======
 This repo uses the default single-context layout. The rationale for splitting
 documents by audience is [ADR-0003](../adr/0003-split-documents-by-audience.md).
->>>>>>> feat/task-runner-spec
 
 | Home | Audience | Holds |
 | --- | --- | --- |

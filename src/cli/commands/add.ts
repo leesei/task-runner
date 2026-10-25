@@ -18,7 +18,7 @@ const ADD_USAGE = "Usage: tq add <task> [context]";
 
 function getVerboseLevel(flags: Record<string, string | true>): number {
   const v = flags["verbose"];
-  if (typeof v === "number") return v;
+  if (typeof v === "string") return Number(v) || 0;
   if (v === true) return 1;
   return 0;
 }
@@ -88,10 +88,10 @@ export async function commandAdd(
       console.error(`Normalized context: ${JSON.stringify(input)}`);
     }
 
-    const { id, createdAt } = cli.core.enqueue(taskId, input);
-    console.log(`Enqueued instance ${id} at ${createdAt}`);
+    const result = cli.core.enqueue(taskId, input);
+    console.log(`Enqueued instance ${result.id} at ${result.createdAt}`);
     console.log(`Task: ${taskId}`);
-    console.log(`Context: ${JSON.stringify(input)}`);
+    console.log(`Context: ${JSON.stringify(result.input)}`);
     return 0;
   } catch (err: any) {
     if (err instanceof CoreError && err.code === "TASK_NOT_FOUND") {

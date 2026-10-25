@@ -10,10 +10,11 @@ import { formatTable } from "../table.ts";
 export async function commandStatus(
   dataDir: string,
   _flags: Record<string, string | true>,
+  projectRoot: string = process.cwd(),
 ): Promise<number> {
   let cli;
   try {
-    cli = openCliCore(dataDir);
+    cli = openCliCore(dataDir, { projectRoot });
   } catch (err: any) {
     if (
       err.message.includes("unable to open") ||
@@ -27,6 +28,10 @@ export async function commandStatus(
   }
 
   try {
+    for (const warning of cli.core.discoveryWarnings()) {
+      console.warn(`Warning: ${warning}`);
+    }
+
     const queues = cli.core.listQueues();
 
     if (queues.length === 0) {
@@ -47,11 +52,6 @@ export async function commandStatus(
           "Total",
         ],
         ...queues.map((queue) => {
-          const total =
-            queue.running +
-            queue.pending +
-            queue.succeeded +
-            queue.failed;
           return [
             queue.id,
             queue.state,
@@ -60,7 +60,7 @@ export async function commandStatus(
             String(queue.pending),
             String(queue.succeeded),
             String(queue.failed),
-            String(total),
+            String(queue.total),
           ];
         }),
       ]),
@@ -68,7 +68,7 @@ export async function commandStatus(
 
     const totals = queues.reduce(
       (acc, queue) => ({
-        total: acc.total + queue.running + queue.pending + queue.succeeded + queue.failed,
+        total: acc.total + queue.total,
         running: acc.running + queue.running,
         pending: acc.pending + queue.pending,
         succeeded: acc.succeeded + queue.succeeded,

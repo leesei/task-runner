@@ -24,9 +24,11 @@ import {
   insertControlRequest,
 } from "../db/queries.ts";
 import type { ControlToken } from "../db/queries.ts";
+import { unlinkSync } from "node:fs";
 import type {
   InstanceRow,
   InstanceState,
+  QueueRow,
   QueueState,
   TaskRow,
 } from "../db/schema.ts";
@@ -34,7 +36,7 @@ import { readLogFile, type LogRecord } from "../db/logs.ts";
 import type { Lifecycle } from "./lifecycle.ts";
 import { CoreError } from "./errors.ts";
 import { getPackageLocations } from "../tasks/lockfile.ts";
-import { loadAllTasks } from "../tasks/discovery.ts";
+import { discoverAllTasks, loadAllTasks } from "../tasks/discovery.ts";
 import {
   parseSchema,
   validateContext,
@@ -52,6 +54,7 @@ export interface QueueSummary {
   pending: number;
   succeeded: number;
   failed: number;
+  total: number;
 }
 
 export interface TaskSummary {
@@ -62,6 +65,7 @@ export interface TaskSummary {
   concurrency: number;
   timeout_ms: number;
   has_schema: boolean;
+  schema: object | null;
 }
 
 export interface InstanceLog {
@@ -72,6 +76,8 @@ export interface InstanceLog {
 export interface EnqueueResult {
   id: number;
   createdAt: string;
+  /** Normalized context after schema defaults and CLI path resolution. */
+  input: unknown;
 }
 
 export interface AbortOutcome {
@@ -109,6 +115,8 @@ export interface Core {
   clear(queueId: string, all?: boolean): ClearOutcome;
 
   reload(): ReloadResult;
+  /** Discovery warnings without changing the registry; used by `status`. */
+  discoveryWarnings(): string[];
   syncQueues(): { created: number; updated: number };
   recoverOnBoot(): { reset: number; started: number; stayedStopped: number };
   requestReload(): Promise<boolean>;
@@ -123,7 +131,9 @@ export interface CoreConfig {
   controlTimeoutMs?: number;
 }
 
-const DEFAULT_CONTROL_TIMEOUT_MS = 5000;
+// Abort processing includes a 5s cooperative grace period in the runner.
+// Leave headroom so a successful abort is not reported as a timeout.
+const DEFAULT_CONTROL_TIMEOUT_MS = 10_000;
 
 function waitForControlRequest(
   db: DB,
@@ -148,10 +158,8 @@ function waitForControlRequest(
   });
 }
 
-function queueSummary(db: DB, queueId: string): QueueSummary | null {
-  const queue = getQueue(db, queueId);
-  if (!queue) return null;
-  const counts = getQueueCounts(db, queueId);
+function summaryFromQueue(db: DB, queue: QueueRow): QueueSummary {
+  const counts = getQueueCounts(db, queue.id);
   return {
     id: queue.id,
     state: queue.state,
@@ -160,7 +168,14 @@ function queueSummary(db: DB, queueId: string): QueueSummary | null {
     pending: counts.pending,
     succeeded: counts.succeeded,
     failed: counts.failed,
+    total:
+      counts.running + counts.pending + counts.succeeded + counts.failed,
   };
+}
+
+function queueSummary(db: DB, queueId: string): QueueSummary | null {
+  const queue = getQueue(db, queueId);
+  return queue ? summaryFromQueue(db, queue) : null;
 }
 
 export function createCore(config: CoreConfig): Core {
@@ -185,7 +200,8 @@ export function createCore(config: CoreConfig): Core {
         );
       }
 
-      return lifecycle.enqueue(taskId, value);
+      const result = lifecycle.enqueue(taskId, value);
+      return { ...result, input: value };
     },
 
     getTaskInputSchema(taskId) {
@@ -197,7 +213,7 @@ export function createCore(config: CoreConfig): Core {
     },
 
     listQueues() {
-      return getAllQueues(db).map((queue) => queueSummary(db, queue.id)!);
+      return getAllQueues(db).map((queue) => summaryFromQueue(db, queue));
     },
 
     getQueue(queueId) {
@@ -213,6 +229,7 @@ export function createCore(config: CoreConfig): Core {
         concurrency: task.concurrency,
         timeout_ms: task.timeout_ms,
         has_schema: task.input_schema !== null,
+        schema: parseSchema(task.input_schema),
       }));
     },
 
@@ -286,10 +303,9 @@ export function createCore(config: CoreConfig): Core {
 
       // The lifecycle owns state, not files. Core removes the logs it returned
       // best-effort; a missing file is not an error.
-      const fs = require("node:fs");
       for (const logPath of result.logPaths) {
         try {
-          fs.unlinkSync(logPath);
+          unlinkSync(logPath);
         } catch {}
       }
 
@@ -299,8 +315,16 @@ export function createCore(config: CoreConfig): Core {
     reload() {
       const packageLocations = getPackageLocations(dataDir);
       const result = loadAllTasks(db, projectRoot, packageLocations);
+      if (result.removed.length > 0) {
+        lifecycle.retireQueues(result.removed);
+      }
       lifecycle.syncQueues();
-      return result;
+      return { loaded: result.loaded, warnings: result.warnings };
+    },
+
+    discoveryWarnings() {
+      const packageLocations = getPackageLocations(dataDir);
+      return discoverAllTasks(projectRoot, db, packageLocations).warnings;
     },
 
     syncQueues() {

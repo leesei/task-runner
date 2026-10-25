@@ -70,10 +70,19 @@ export function createRunner(config: RunnerConfig) {
           // before the runner claims the returned instance again. A task that
           // ignores the signal keeps running, but its late writes are fenced.
           if (entries.length > 0 && abortGraceMs > 0) {
-            await Promise.race([
-              Promise.all(entries.map((entry) => entry.settled)),
-              Bun.sleep(abortGraceMs),
+            const allSettled = Promise.all(
+              entries.map((entry) => entry.settled),
+            ).then(() => true);
+            const withinGrace = await Promise.race([
+              allSettled,
+              Bun.sleep(abortGraceMs).then(() => false),
             ]);
+            if (!withinGrace) {
+              const keys = result.cancelled.map(controllerKey).join(", ");
+              console.warn(
+                `Abort grace of ${abortGraceMs}ms expired for ${keys}; the task is still running and its late writes will be ignored`,
+              );
+            }
           }
         }
       } else if (request.kind === "reload") {

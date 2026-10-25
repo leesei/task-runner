@@ -193,18 +193,26 @@ export async function executeTask(
           finish({ kind: "success" });
         }
       } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
         if (!completed) {
-          const message = err instanceof Error ? err.message : String(err);
           console.error(`Task ${claim.taskId}: ${message}`);
           finish({ kind: "failure", exitCode: 1, reason: message });
+        } else {
+          console.warn(
+            `Instance ${claim.instanceId} attempt ${claim.attempt}: task threw after completion (ignored): ${message}`,
+          );
         }
       }
     });
   } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
     if (!completed) {
-      const message = err instanceof Error ? err.message : String(err);
       console.error(`Task ${claim.taskId}: ${message}`);
       finish({ kind: "failure", exitCode: 1, reason: message });
+    } else {
+      console.warn(
+        `Instance ${claim.instanceId} attempt ${claim.attempt}: task threw after completion (ignored): ${message}`,
+      );
     }
   } finally {
     if (timeoutHandle !== undefined) {

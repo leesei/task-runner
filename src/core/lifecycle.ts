@@ -64,6 +64,8 @@ export interface Lifecycle {
   start(queueId: string): QueueState;
   stop(queueId: string): QueueState;
   syncQueues(): { created: number; updated: number };
+  /** Remove queues whose tasks disappeared from the registry. */
+  retireQueues(queueIds: string[]): { retired: number };
   recoverOnBoot(): { reset: number; started: number; stayedStopped: number };
   clearQueue(queueId: string, options?: { all?: boolean }): ClearResult;
 }
@@ -576,6 +578,19 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
 
       publish(collected);
       return result;
+    },
+
+    retireQueues(queueIds) {
+      if (queueIds.length === 0) return { retired: 0 };
+
+      return immediate(db, () => {
+        let retired = 0;
+        for (const queueId of queueIds) {
+          const result = db.run("DELETE FROM queues WHERE id = ?", [queueId]);
+          retired += result.changes;
+        }
+        return { retired };
+      });
     },
 
     recoverOnBoot() {

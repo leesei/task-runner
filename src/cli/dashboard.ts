@@ -293,19 +293,9 @@ export function getDashboardHtml(): string {
         logInstance.textContent = instanceId;
         logSection.classList.remove("hidden");
         logPanel.innerHTML = "";
-        // Load existing log
-        try {
-          const res = await fetch(\`/api/instances/\${instanceId}/log\`);
-          if (res.ok) {
-            const records = await res.json();
-            for (const rec of records) {
-              appendLogLine(rec);
-            }
-          }
-        } catch (err) {
-          console.error(err);
-        }
-        // Stream live updates
+        // The log stream replays existing records and then tails the file, so
+        // it is the single source of log lines. Fetching /log first would
+        // duplicate every line.
         if (window._logSource) {
           window._logSource.close();
         }

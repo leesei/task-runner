@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { DEFAULT_DATA_DIR_NAME } from "../defaults.ts";
 import type { DB } from "../db/database.ts";
-import { getTask, insertTask } from "../db/queries.ts";
+import { getTask, insertTask, deleteTask, getAllTasks } from "../db/queries.ts";
 
 export interface TaskManifest {
   namespace?: string;
@@ -111,7 +111,10 @@ function resolveTaskDir(
     };
   }
 
-  const namespace = namespaceOverride ?? manifest.namespace ?? "default";
+  // Identity comes from the manifest. A package's lockfile namespace is the
+  // fallback for tasks that omit `namespace`, not an override: moving a
+  // package between machines must not rename a task that declares its own.
+  const namespace = manifest.namespace ?? namespaceOverride ?? "default";
   const id = `${namespace}:${manifest.id}`;
 
   if (!existsSync(indexPath)) {
@@ -327,7 +330,7 @@ export function loadAllTasks(
   db: DB,
   projectRoot: string,
   packageLocations: PackageLocation[] = [],
-): { loaded: number; warnings: string[] } {
+): { loaded: number; warnings: string[]; removed: string[] } {
   const result = discoverAllTasks(projectRoot, db, packageLocations);
   let loaded = 0;
 
@@ -336,10 +339,21 @@ export function loadAllTasks(
     loaded++;
   }
 
+  // Retire tasks that are no longer discoverable. Their queues are removed by
+  // the lifecycle, which owns queue state; historical instances stay in the
+  // instances table for audit and logs.
+  const discoveredIds = new Set(result.tasks.map((task) => task.id));
+  const removed = getAllTasks(db)
+    .map((task) => task.id)
+    .filter((id) => !discoveredIds.has(id));
+  for (const id of removed) {
+    deleteTask(db, id);
+  }
+
   const allWarnings = [...result.warnings];
   for (const task of result.tasks) {
     allWarnings.push(...task.warnings);
   }
 
-  return { loaded, warnings: allWarnings };
+  return { loaded, warnings: allWarnings, removed };
 }

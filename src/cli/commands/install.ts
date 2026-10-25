@@ -27,6 +27,7 @@ export async function commandInstall(
   // Install the package with Bun
   console.log(`Installing ${packageName}...`);
   const proc = Bun.spawn(["bun", "add", packageName], {
+    cwd: projectRoot,
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -71,10 +72,13 @@ export async function commandInstall(
   const lockfilePath = getLockfilePath(dataDir);
   const existing = readLockfile(dataDir);
 
-  // Check namespace collision with default
+  // A package that claims the reserved `default` namespace cannot shadow
+  // project/user tasks. Record it anyway; discovery reports the collision as a
+  // load warning and skips the package's tasks.
   if (namespace === "default") {
-    console.error("Error: installed packages must not use the 'default' namespace");
-    return 2;
+    console.warn(
+      `Warning: package ${packageName} declares reserved namespace "default"; its tasks will be skipped`,
+    );
   }
 
   for (const p of existing.packages) {

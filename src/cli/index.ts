@@ -128,7 +128,7 @@ export async function main(args: string[]): Promise<number> {
         parsed.flags,
       );
     case "status":
-      return await commandStatus(dataDir, parsed.flags);
+      return await commandStatus(dataDir, parsed.flags, projectRoot);
     case "config":
       return await commandConfig(dataDir, daemonPort, parsed.flags, projectRoot);
     case "logs":

@@ -23,6 +23,12 @@ export interface ParsedArgs {
  */
 const BOOLEAN_FLAGS = new Set(["all", "tasks"]);
 
+function incrementVerbose(flags: Record<string, string | true>): void {
+  const current =
+    typeof flags["verbose"] === "string" ? Number(flags["verbose"]) : 0;
+  flags["verbose"] = String(current + 1);
+}
+
 export function parseArgs(args: string[]): ParsedArgs {
   const flags: Record<string, string | true> = {};
   const positional: string[] = [];
@@ -42,7 +48,7 @@ export function parseArgs(args: string[]): ParsedArgs {
       flags["help"] = true;
       i++;
     } else if (arg === "-v") {
-      flags["verbose"] = (typeof flags["verbose"] === "number" ? flags["verbose"] + 1 : 1);
+      incrementVerbose(flags);
       i++;
     } else if (arg.startsWith("--")) {
       const eqIdx = arg.indexOf("=");
@@ -50,7 +56,7 @@ export function parseArgs(args: string[]): ParsedArgs {
         // --key=value
         const key = arg.slice(2, eqIdx);
         if (key === "verbose") {
-          flags["verbose"] = (typeof flags["verbose"] === "number" ? flags["verbose"] + 1 : 1);
+          incrementVerbose(flags);
           i++;
           continue;
         }
@@ -66,7 +72,7 @@ export function parseArgs(args: string[]): ParsedArgs {
         // --key (possibly followed by value as next arg)
         const key = arg.slice(2);
         if (key === "verbose") {
-          flags["verbose"] = (typeof flags["verbose"] === "number" ? flags["verbose"] + 1 : 1);
+          incrementVerbose(flags);
           i++;
           continue;
         }

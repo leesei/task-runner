@@ -194,7 +194,7 @@ export function createApi(h: ApiHandlers) {
   function handleEnqueueInstance(body: { task: string; input: unknown }): Response {
     try {
       const result = core.enqueue(body.task, body.input);
-      return json({ id: result.id, task: body.task, input: body.input, createdAt: result.createdAt });
+      return json({ id: result.id, task: body.task, input: result.input, createdAt: result.createdAt });
     } catch (err) {
       return coreErrorResponse(err);
     }
@@ -218,93 +218,6 @@ export function createApi(h: ApiHandlers) {
       ended_at: instance.ended_at,
       input: JSON.parse(instance.input),
     });
-  }
-
-  function handleReload(): Response {
-    try {
-      const { loaded, warnings } = core.reload();
-      return json({ reloaded: loaded, warnings });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  function handleClearQueue(queueId: string, all: boolean): Response {
-    try {
-      const result = core.clear(queueId, all);
-      return json({ success: true, deleted: result.deleted, queueId });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  function handleStartQueue(queueId: string): Response {
-    try {
-      const state = core.start(queueId);
-      return json({ success: true, state });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  function handleStopQueue(queueId: string): Response {
-    try {
-      const state = core.stop(queueId);
-      return json({ success: true, state });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  async function handleAbortQueue(queueId: string): Promise<Response> {
-    try {
-      const result = await core.abort(queueId);
-      return json({
-        success: true,
-        state: result.queueState,
-        returnedToPending: result.cancelled.map((token: any) => token.instanceId),
-      });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  function handleEnqueueInstance(body: { task: string; input: unknown }): Response {
-    try {
-      const result = core.enqueue(body.task, body.input);
-      return json({ id: result.id, task: body.task, input: body.input, createdAt: result.createdAt });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
-  }
-
-  function handleInstanceDetail(instanceId: number): Response {
-    const instance = core.getInstance(instanceId);
-    if (!instance) {
-      return jsonError("INSTANCE_NOT_FOUND", `Instance not found: ${instanceId}`, 404);
-    }
-    return json({
-      id: instance.id,
-      task_id: instance.task_id,
-      state: instance.state,
-      exit_code: instance.exit_code,
-      failure_reason: instance.failure_reason,
-      attempt: instance.attempt,
-      duration_ms: instance.duration_ms,
-      created_at: instance.created_at,
-      started_at: instance.started_at,
-      ended_at: instance.ended_at,
-      input: JSON.parse(instance.input),
-    });
-  }
-
-  function handleReload(): Response {
-    try {
-      const { loaded, warnings } = core.reload();
-      return json({ reloaded: loaded, warnings });
-    } catch (err) {
-      return coreErrorResponse(err);
-    }
   }
 
   function handleClearQueue(queueId: string, all: boolean): Response {
@@ -434,46 +347,62 @@ export function createApi(h: ApiHandlers) {
   function handleEventsSSE(req: Request): Response {
     const encoder = new TextEncoder();
     let closed = false;
+    let backlog = 0;
+    let unsubscribe: (() => void) | undefined;
+
+    // A dashboard that stops reading must not grow the daemon's memory without
+    // bound. Once the pending frame count passes the limit, close the stream;
+    // EventSource reconnects and replays from a fresh snapshot.
+    const MAX_BACKLOG = 1000;
 
     const stream = new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode(": connected\n\n"));
-
-        const unsubscribe = events.subscribe((event: LifecycleEvent) => {
+        const send = (frame: string): void => {
           if (closed) return;
+          if (backlog >= MAX_BACKLOG) {
+            closed = true;
+            unsubscribe?.();
+            try { controller.close(); } catch {}
+            return;
+          }
+          backlog++;
           try {
-            if (event.type === "instanceStateChanged") {
-              controller.enqueue(
-                encoder.encode(
-                  `event: instanceStateChanged\ndata: ${JSON.stringify({ instanceId: event.instanceId, state: event.state })}\n\n`,
-                ),
-              );
-            } else if (event.type === "queueStateChanged") {
-              controller.enqueue(
-                encoder.encode(
-                  `event: queueStateChanged\ndata: ${JSON.stringify({ queueId: event.queueId, state: event.state })}\n\n`,
-                ),
-              );
-            } else {
-              controller.enqueue(
-                encoder.encode(
-                  `event: instancesCleared\ndata: ${JSON.stringify({ queueId: event.queueId, instanceIds: event.instanceIds })}\n\n`,
-                ),
-              );
-            }
+            controller.enqueue(encoder.encode(frame));
           } catch {
             closed = true;
-            unsubscribe();
+            unsubscribe?.();
+          }
+        };
+
+        controller.enqueue(encoder.encode(": connected\n\n"));
+
+        unsubscribe = events.subscribe((event: LifecycleEvent) => {
+          if (event.type === "instanceStateChanged") {
+            send(
+              `event: instanceStateChanged\ndata: ${JSON.stringify({ instanceId: event.instanceId, state: event.state })}\n\n`,
+            );
+          } else if (event.type === "queueStateChanged") {
+            send(
+              `event: queueStateChanged\ndata: ${JSON.stringify({ queueId: event.queueId, state: event.state })}\n\n`,
+            );
+          } else {
+            send(
+              `event: instancesCleared\ndata: ${JSON.stringify({ queueId: event.queueId, instanceIds: event.instanceIds })}\n\n`,
+            );
           }
         });
 
         const onAbort = () => {
           closed = true;
-          unsubscribe();
+          unsubscribe?.();
           try { controller.close(); } catch {}
         };
 
         req.signal.addEventListener("abort", onAbort);
+      },
+      pull() {
+        // The consumer drained the frames it had; memory is released.
+        backlog = 0;
       },
     });
 
