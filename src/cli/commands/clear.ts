@@ -14,10 +14,13 @@ import { openCliCore } from "../core.ts";
 export async function commandClear(
   dataDir: string,
   args: string[],
-  _flags: Record<string, string | true>,
+  flags: Record<string, string | true>,
 ): Promise<number> {
-  const all = args[0] === "--all";
-  const queueId = all ? args[1] : args[0];
+  // The parser turns `--all` into a boolean flag, but keep the positional
+  // fallback for direct callers.
+  const positionalAll = args[0] === "--all";
+  const all = flags["all"] === true || positionalAll;
+  const queueId = positionalAll ? args[1] : args[0];
 
   if (!queueId) {
     console.error("Usage: tq clear [--all] <queue>");

@@ -16,6 +16,13 @@ export interface ParsedArgs {
   raw: string[];
 }
 
+/**
+ * Flags that never consume the following token. Without this list,
+ * `tq clear --all default:cat` parses `default:cat` as the value of `--all`
+ * and leaves no queue positional.
+ */
+const BOOLEAN_FLAGS = new Set(["all", "tasks"]);
+
 export function parseArgs(args: string[]): ParsedArgs {
   const flags: Record<string, string | true> = {};
   const positional: string[] = [];
@@ -47,6 +54,11 @@ export function parseArgs(args: string[]): ParsedArgs {
           i++;
           continue;
         }
+        if (BOOLEAN_FLAGS.has(key)) {
+          flags[key] = true;
+          i++;
+          continue;
+        }
         const value = arg.slice(eqIdx + 1);
         flags[key] = value;
         i++;
@@ -55,6 +67,11 @@ export function parseArgs(args: string[]): ParsedArgs {
         const key = arg.slice(2);
         if (key === "verbose") {
           flags["verbose"] = (typeof flags["verbose"] === "number" ? flags["verbose"] + 1 : 1);
+          i++;
+          continue;
+        }
+        if (BOOLEAN_FLAGS.has(key)) {
+          flags[key] = true;
           i++;
           continue;
         }

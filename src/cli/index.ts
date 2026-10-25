@@ -98,6 +98,7 @@ export async function main(args: string[]): Promise<number> {
         parsed.positional.slice(1),
         parsed.flags,
         process.cwd(),
+        projectRoot,
       );
     case "start":
       return await commandStart(

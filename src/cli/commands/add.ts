@@ -28,6 +28,7 @@ export async function commandAdd(
   args: string[],
   flags: Record<string, string | true>,
   cwd: string = process.cwd(),
+  projectRoot: string = cwd,
 ): Promise<number> {
   if (args.length === 0) {
     console.error(ADD_USAGE);
@@ -39,14 +40,27 @@ export async function commandAdd(
 
   let cli;
   try {
-    cli = openCliCore(dataDir, { bootstrap: true, projectRoot: cwd });
+    cli = openCliCore(dataDir, { bootstrap: true, projectRoot });
   } catch (err: any) {
     console.error(`Error opening database: ${err.message}`);
     return 1;
   }
 
   try {
-    const schema = cli.core.getTaskInputSchema(taskId);
+    // Offline `add` may be the first command against a fresh project. Reload
+    // discovery when the task is not yet registered so the CLI does not
+    // require a daemon just to enqueue the first instance.
+    let schema: object | null;
+    try {
+      schema = cli.core.getTaskInputSchema(taskId);
+    } catch (err) {
+      if (err instanceof CoreError && err.code === "TASK_NOT_FOUND") {
+        cli.core.reload();
+        schema = cli.core.getTaskInputSchema(taskId);
+      } else {
+        throw err;
+      }
+    }
 
     if (verbose >= 1) {
       console.error(`Resolved task: ${taskId}`);
