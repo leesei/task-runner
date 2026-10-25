@@ -337,6 +337,55 @@ describe("Seam B: CLI subprocess", () => {
     expect(stdout).toContain("default:echo");
   });
 
+  test("tq add prints the normalized context after schema defaults", async () => {
+    writeTask(projectDir, "defaulted", {
+      "settings.json": JSON.stringify({
+        namespace: "default",
+        id: "defaulted",
+        name: "Defaulted",
+        inputSchema: "schema.json",
+      }),
+      "schema.json": JSON.stringify({
+        type: "object",
+        properties: { mode: { type: "string", default: "fast" } },
+      }),
+      "index.ts": `export default async function(ctx){ ctx.done(0); }`,
+      "README.md": "# defaulted",
+    });
+    const proc = Bun.spawn([TQ_BIN, "add", "default:defaulted", "{}"], {
+      cwd: projectDir,
+      env: { ...process.env, TQ_DATA_DIR: dataDir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(proc.exitCode).toBe(0);
+    expect(stdout).toContain('"mode":"fast"');
+  });
+
+  test("tq status surfaces discovery warnings", async () => {
+    writeTask(projectDir, "broken", {
+      "settings.json": JSON.stringify({
+        namespace: "default",
+        id: "broken",
+        name: "Broken",
+      }),
+      "index.ts": `export default async function(ctx){ ctx.done(0); }`,
+    });
+    const proc = Bun.spawn([TQ_BIN, "status"], {
+      cwd: projectDir,
+      env: { ...process.env, TQ_DATA_DIR: dataDir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = proc.stderr ? await new Response(proc.stderr).text() : "";
+    await proc.exited;
+    expect(proc.exitCode).toBe(0);
+    expect(stderr).toContain("Warning:");
+    expect(stderr).toContain("missing README.md");
+  });
+
   test("tq logs <instance-id> prints merged log", async () => {
     // enqueue a task first
     writeTask(projectDir, "logtest", {
@@ -359,7 +408,7 @@ describe("Seam B: CLI subprocess", () => {
     expect(proc.exitCode).toBe(0);
     const m = addOut.match(/Enqueued instance (\d+)/);
     expect(m).toBeTruthy();
-    const id = m![1];
+    const id = m![1]!;
     proc = Bun.spawn([TQ_BIN, "logs", id], {
       cwd: projectDir,
       env: { ...process.env, TQ_DATA_DIR: dataDir },

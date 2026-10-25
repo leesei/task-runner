@@ -194,6 +194,36 @@ describe("execution: fence, timeout, and append-only logs", () => {
     expect(instance.exit_code).toBeNull();
   });
 
+  test("a throw after done() is ignored but reported as a warning", async () => {
+    const entryPoint = addTaskFile(
+      projectDir,
+      "late-throw",
+      `export default async function(ctx) {
+        ctx.done(0);
+        throw new Error("boom after done");
+      }`,
+    );
+    insertTaskRow(db, "default:late-throw", entryPoint);
+    lifecycle.syncQueues();
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      const { id } = lifecycle.enqueue("default:late-throw", {});
+      const [claim] = lifecycle.claim();
+      await executeTask(claim!, lifecycle, new AbortController().signal, () => {});
+      expect(getInstance(db, id)!.state).toBe("SUCCESS");
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(warnings.join("\n")).toContain("threw after completion");
+    expect(warnings.join("\n")).toContain("boom after done");
+  });
+
   test("a late completion from a superseded attempt is ignored", async () => {
     const marker = join(projectDir, "first-attempt.marker");
     const entryPoint = addTaskFile(
@@ -340,7 +370,16 @@ describe("runner: control requests, grace, and reload", () => {
 
     const abortPromise = core.abort("default:stubborn");
     const started = Date.now();
-    await runner.runOnce();
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      await runner.runOnce();
+    } finally {
+      console.warn = originalWarn;
+    }
     const result = await abortPromise;
     const elapsed = Date.now() - started;
 
@@ -348,6 +387,7 @@ describe("runner: control requests, grace, and reload", () => {
     expect(result.cancelled).toEqual([{ instanceId: id, attempt: 1 }]);
     expect(getInstance(db, id)!.state).toBe("PENDING");
     expect(getInstance(db, id)!.attempt).toBe(2);
+    expect(warnings.join("\n")).toContain("Abort grace");
   });
 
   test("a stale abort request is discarded without changing state", async () => {

@@ -156,6 +156,14 @@ describe("cat", () => {
     expect(limited.exitCode).toBe(0);
     expect(limited.stdout.split("\n")).toHaveLength(2);
   });
+
+  test("fails clearly for a missing file", async () => {
+    const result = await runTask(TASKS.cat!, {
+      filepath: join(makeTempDir("tq-cat-"), "missing.txt"),
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("cat:");
+  });
 });
 
 describe("env", () => {
@@ -178,6 +186,13 @@ describe("env", () => {
       delete process.env.TQ_TEST_API_KEY;
       delete process.env.TQ_TEST_NORMAL;
     }
+  });
+
+  test("prints the environment with no arguments", async () => {
+    const result = await runTask(TASKS.env!, {});
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length).toBeGreaterThan(0);
+    expect(result.stdout).toContain("PATH=");
   });
 });
 

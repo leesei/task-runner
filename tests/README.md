@@ -1,6 +1,6 @@
 # Test Cases — Task Runner Sample Tasks
 
-Saved test fixtures and scripts for verifying the sample tasks (`cat`, `env`, `sha256`, `ls`, `minfo`).
+Saved test fixtures and tests for verifying the sample tasks (`cat`, `env`, `sha256`, `ls`, `minfo`).
 
 ## Structure
 
@@ -13,40 +13,29 @@ tests/
 ├── sha256/
 │   └── hello.txt                 # echo -n "hello" -> known digest
 ├── sample-tasks.test.ts          # task contract, schemas, settings, and behavior
-├── sample-tasks-runner.test.ts   # the five tasks executed through createRunner
-└── run-all.ts                    # ad-hoc script that exercises every task via runWith
+└── sample-tasks-runner.test.ts   # the five tasks executed through createRunner
 ```
 
 ## Running
 
 ```sh
 bun test                          # includes the sample-task tests
-bun run tests/run-all.ts          # ad-hoc end-to-end-ish task check
 ```
 
-## Expected results (`run-all.ts`)
+## Expected results
 
-Run from the repository root:
+The sample-task assertions live in `sample-tasks.test.ts` (direct task calls) and
+`sample-tasks-runner.test.ts` (through the runner contract). Together they cover:
 
-```
-13 tests run, 0 failed
-```
-
-### OK (13)
-
-- `ls(tests/1)` — lists the fixture directory.
-- `ls(missing dir)` — expected failure; exit 1 with `No such file or directory`.
-- `cat(normal file)` — prints 4 lines, no redaction.
-- `cat(sensitive file)` — redacts 8 lines; stderr: `cat: redacted 8 sensitive value(s)`.
-- `cat(missing file)` — expected failure; exit 1.
-- `cat(limit 2)` — prints only the first 2 lines of the normal file.
-- `sha256(hello.txt)` — prints `2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824` (the correct SHA-256 of `hello`).
-- `sha256(missing file)` — expected failure; exit 1.
-- `env(values true)` — dumps all env vars; sensitive ones redacted.
-- `env(filter PATH, values true)` — prints `PATH=[REDACTED]`.
-- `env(filter HOME, names only)` — prints `HOME`.
-- `env(no args)` — same as `env(values true)`.
-- `minfo(tests/1/1.mp4)` — prints `Skipping file` for a file with no audio/video tracks; exit 0.
+- `ls` — lists a fixture directory; missing directory exits 1.
+- `cat` — prints normal files unchanged; redacts the sensitive fixture (8 values);
+  missing file exits 1; `limit: 2` prints only the first 2 lines.
+- `sha256` — prints `2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824`
+  for `hello.txt`; missing file exits 1.
+- `env` — dumps all env vars with sensitive ones redacted; `filter` and `values: false`
+  work; no arguments behaves like `values: true`.
+- `minfo` — reports a missing `mediainfo` CLI clearly; exits 0 for a readable media file
+  when `mediainfo` is installed.
 
 ## Redaction correctness (cat)
 

@@ -130,6 +130,22 @@ describe("Seam A: discovery namespacing and precedence", () => {
     expect(tasks.map((t) => t.id)).toEqual(["acme:convert"]);
   });
 
+  test("a task manifest namespace wins over the package lockfile namespace", () => {
+    const project = temp();
+    const pkg = temp();
+    writeTask(join(pkg, "tasks"), "convert", {
+      namespace: "declared",
+      id: "convert",
+      name: "Convert",
+    });
+
+    const { tasks } = discoverAllTasks(project, db, [
+      { name: "pkg", tasksDir: join(pkg, "tasks"), namespace: "acme" },
+    ]);
+
+    expect(tasks.map((t) => t.id)).toEqual(["declared:convert"]);
+  });
+
   test("a package claiming the default namespace is rejected with a warning", () => {
     const project = temp();
     const pkg = temp();

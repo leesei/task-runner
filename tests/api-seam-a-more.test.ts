@@ -89,7 +89,7 @@ describe("Seam A: additional cases", () => {
       body: JSON.stringify({ task: "default:echo", input: { msg: "hi" } }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { id?: number };
     expect(body.id).toBeDefined();
   });
 });

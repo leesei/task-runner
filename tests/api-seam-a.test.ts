@@ -19,6 +19,18 @@ function makeTempDir() {
   return mkdtempSync(join(tmpdir(), "tq-test-"));
 }
 
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await Bun.sleep(10);
+  }
+  throw new Error("timed out waiting for condition");
+}
+
 function writeTask(dir: string, name: string, files: Record<string, string>) {
   const taskDir = join(dir, name);
   mkdirSync(taskDir, { recursive: true });
@@ -126,6 +138,21 @@ describe("Seam A: Daemon HTTP API", () => {
       "index.ts": `export default async function(ctx) { ctx.done(0); }`,
       "README.md": "# noschema",
     });
+    writeTask(join(projectDir, "tasks"), "validated", {
+      "settings.json": JSON.stringify({
+        namespace: "default",
+        id: "validated",
+        name: "Validated task",
+        concurrency: 1,
+        inputSchema: "schema.json",
+      }),
+      "schema.json": JSON.stringify({
+        type: "object",
+        properties: { mode: { type: "string", default: "fast" } },
+      }),
+      "index.ts": `export default async function(ctx) { ctx.done(0); }`,
+      "README.md": "# validated",
+    });
 
     loadAllTasks(db, projectDir, []);
     harness = createHarness(db, dataDir, projectDir);
@@ -155,7 +182,7 @@ describe("Seam A: Daemon HTTP API", () => {
   test("health endpoint", async () => {
     const res = await fetch(`${baseUrl}/api/health`);
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { status: string; pid?: number };
     expect(body.status).toBe("ok");
     expect(body.pid).toBeDefined();
   });
@@ -163,15 +190,37 @@ describe("Seam A: Daemon HTTP API", () => {
   test("tasks endpoint lists registered tasks", async () => {
     const res = await fetch(`${baseUrl}/api/tasks`);
     expect(res.status).toBe(200);
-    const tasks = await res.json();
+    const tasks = (await res.json()) as Array<{
+      id: string;
+      has_schema: boolean;
+      schema: unknown;
+    }>;
     expect(tasks.length).toBeGreaterThan(0);
+    const validated = tasks.find((task) => task.id === "default:validated");
+    expect(validated?.has_schema).toBe(true);
+    expect(validated?.schema).toEqual({
+      type: "object",
+      properties: { mode: { type: "string", default: "fast" } },
+    });
   });
 
   test("queues endpoint", async () => {
     const res = await fetch(`${baseUrl}/api/queues`);
     expect(res.status).toBe(200);
-    const queues = await res.json();
+    const queues = (await res.json()) as Array<{ total: number }>;
     expect(Array.isArray(queues)).toBe(true);
+    expect(queues.every((queue) => typeof queue.total === "number")).toBe(true);
+  });
+
+  test("enqueue returns the normalized context with schema defaults", async () => {
+    const res = await fetch(`${baseUrl}/api/instances`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task: "default:validated", input: {} }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { input?: unknown };
+    expect(body.input).toEqual({ mode: "fast" });
   });
 
   test("enqueue instance", async () => {
@@ -181,7 +230,7 @@ describe("Seam A: Daemon HTTP API", () => {
       body: JSON.stringify({ task: "default:success", input: {} }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { id?: number; task?: string };
     expect(body.id).toBeDefined();
     expect(body.task).toBe("default:success");
   });
@@ -193,7 +242,7 @@ describe("Seam A: Daemon HTTP API", () => {
       body: JSON.stringify({ task: "nope:nope", input: {} }),
     });
     expect(res.status).toBe(404);
-    const body = await res.json();
+    const body = (await res.json()) as { code?: string };
     expect(body.code).toBe("TASK_NOT_FOUND");
   });
 
@@ -204,7 +253,54 @@ describe("Seam A: Daemon HTTP API", () => {
       body: "{not json",
     });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as { code?: string };
     expect(body.code).toBe("INVALID_JSON");
+  });
+
+  test("events endpoint streams lifecycle events", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/api/events`, {
+      signal: controller.signal,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    const first = await reader.read();
+    expect(decoder.decode(first.value)).toContain(": connected");
+
+    const { id } = harness.core.enqueue("default:echo", { source: "sse" });
+    const next = await reader.read();
+    const frame = decoder.decode(next.value);
+    expect(frame).toContain("event: instanceStateChanged");
+    expect(frame).toContain(String(id));
+
+    controller.abort();
+    try {
+      await reader.cancel();
+    } catch {}
+  });
+
+  test("log stream replays existing records and then tails the file", async () => {
+    const { id } = harness.core.enqueue("default:noisy", {});
+    await waitFor(() => harness.core.getInstance(id)!.state === "SUCCESS");
+
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/api/instances/${id}/log/stream`, {
+      signal: controller.signal,
+    });
+    expect(res.status).toBe(200);
+
+    const reader = res.body!.getReader();
+    const first = await reader.read();
+    const text = new TextDecoder().decode(first.value);
+    expect(text).toContain("hello");
+    expect(text).toContain("world");
+
+    controller.abort();
+    try {
+      await reader.cancel();
+    } catch {}
   });
 });

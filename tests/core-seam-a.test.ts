@@ -436,4 +436,31 @@ describe("Seam A: core operations", () => {
     expect(core.getQueue("default:newtask")!.concurrency).toBe(2);
   });
 
+  test("reload retires tasks and queues whose folder disappeared", () => {
+    writeTask(join(projectDir, "tasks"), "ephemeral", {
+      "settings.json": JSON.stringify({
+        namespace: "default",
+        id: "ephemeral",
+        name: "Ephemeral",
+        concurrency: 1,
+      }),
+      "index.ts": `export default async function(ctx) { ctx.done(0); }`,
+      "README.md": "# ephemeral",
+    });
+    loadAllTasks(db, projectDir, []);
+    core.syncQueues();
+    expect(core.getQueue("default:ephemeral")).not.toBeNull();
+
+    rmSync(join(projectDir, "tasks", "ephemeral"), {
+      recursive: true,
+      force: true,
+    });
+    core.reload();
+
+    expect(core.getQueue("default:ephemeral")).toBeNull();
+    expect(
+      core.listTasks().find((task) => task.id === "default:ephemeral"),
+    ).toBeUndefined();
+  });
+
 });
