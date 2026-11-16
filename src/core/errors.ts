@@ -13,6 +13,7 @@ export type CoreErrorCode =
   | "INVALID_CONCURRENCY"
   | "CLEAR_REFUSED_RUNNING"
   | "INPUT_SCHEMA_VIOLATION"
+  | "INVALID_CWD"
   | "CONTROL_TIMEOUT";
 
 export interface CoreErrorDetails {

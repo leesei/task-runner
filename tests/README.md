@@ -13,7 +13,8 @@ tests/
 ├── sha256/
 │   └── hello.txt                 # echo -n "hello" -> known digest
 ├── sample-tasks.test.ts          # task contract, schemas, settings, and behavior
-└── sample-tasks-runner.test.ts   # the five tasks executed through createRunner
+├── sample-tasks-runner.test.ts   # the five tasks executed through createRunner
+└── reencode-task.test.ts         # VAAPI reencode task with a fake ffmpeg binary
 ```
 
 ## Running
@@ -74,3 +75,17 @@ bun tq add default:sha256 '{ "filepath": "package.json" }'
 # fail
 bun tq add default:sha256 '{ "path": "package.json" }'
 ```
+
+## reencode
+
+The VAAPI reencode task has its own tests in `reencode-task.test.ts`. They use a fake
+`ffmpeg` shell script, so success, failure, overwrite, stale-part, and abort paths run
+without hardware. The real encode is opt-in:
+
+```sh
+TQ_TEST_VAAPI=1 bun test tests/reencode-task.test.ts
+```
+
+That case generates a one-second clip with `lavfi`, encodes it with
+`/dev/dri/renderD128` (override with `TQ_VAAPI_DEVICE`), and checks the result with
+`ffprobe`.

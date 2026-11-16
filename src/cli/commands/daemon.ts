@@ -51,6 +51,7 @@ export async function commandDaemon(
     db,
     events,
     logDir: dbConfig.logDir,
+    defaultCwd: projectRoot,
   });
   const core = createCore({
     db,

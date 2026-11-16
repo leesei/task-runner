@@ -9,7 +9,7 @@
  * See ADR-0001 (ownership) and ADR-0002 (completion fence).
  */
 
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { DB } from "../db/database.ts";
 import type { InstanceState, QueueState } from "../db/schema.ts";
 import { CoreError } from "./errors.ts";
@@ -27,6 +27,8 @@ export interface Claim extends ClaimToken {
   entryPoint: string;
   timeoutMs: number;
   input: unknown;
+  /** Absolute directory the instance was enqueued from. */
+  cwd: string;
   logPath: string;
 }
 
@@ -56,7 +58,11 @@ export interface ClearResult {
 }
 
 export interface Lifecycle {
-  enqueue(taskId: string, input: unknown): { id: number; createdAt: string };
+  enqueue(
+    taskId: string,
+    input: unknown,
+    cwd?: string,
+  ): { id: number; createdAt: string };
   claim(): Claim[];
   claimQueue(queueId: string): Claim[];
   finishRun(token: ClaimToken, outcome: RunOutcome): FinishResult;
@@ -74,6 +80,11 @@ export interface LifecycleConfig {
   db: DB;
   events: EventSink;
   logDir: string;
+  /**
+   * Working directory for instances whose row has no stored cwd (rows written
+   * before the cwd column existed). New enqueues always store one.
+   */
+  defaultCwd?: string;
   now?: () => Date;
 }
 
@@ -104,6 +115,7 @@ interface ClaimedRow {
   id: number;
   task_id: string;
   input: string;
+  cwd: string | null;
   attempt: number;
 }
 
@@ -138,6 +150,7 @@ function durationMs(startedAt: string | null, endedAt: Date): number | null {
 
 export function createLifecycle(config: LifecycleConfig): Lifecycle {
   const { db, events, logDir } = config;
+  const defaultCwd = resolve(config.defaultCwd ?? process.cwd());
   const now = config.now ?? (() => new Date());
 
   function publish(collected: LifecycleEvent[]): void {
@@ -216,7 +229,7 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
 
     const pending = db
       .query<ClaimedRow, [string, number]>(
-        `SELECT id, task_id, input, attempt
+        `SELECT id, task_id, input, cwd, attempt
          FROM instances
          WHERE task_id = ? AND state = 'PENDING'
          ORDER BY id ASC
@@ -253,6 +266,7 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
         entryPoint: task.entry_point ?? task.id,
         timeoutMs: task.timeout_ms,
         input: parseInput(row.input),
+        cwd: row.cwd ?? defaultCwd,
         logPath,
       });
       collected.push({
@@ -271,7 +285,7 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
   }
 
   return {
-    enqueue(taskId, input) {
+    enqueue(taskId, input, cwd) {
       const collected: LifecycleEvent[] = [];
       const result = immediate(db, () => {
         const task = getTask(taskId);
@@ -286,9 +300,9 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
 
         const createdAt = now().toISOString();
         const inserted = db.run(
-          `INSERT INTO instances (task_id, input, state, attempt, created_at)
-           VALUES (?, ?, 'PENDING', 1, ?)`,
-          [taskId, JSON.stringify(input), createdAt],
+          `INSERT INTO instances (task_id, input, cwd, state, attempt, created_at)
+           VALUES (?, ?, ?, 'PENDING', 1, ?)`,
+          [taskId, JSON.stringify(input), cwd ?? defaultCwd, createdAt],
         );
         const id = Number(
           (inserted as { lastInsertRowid?: number | bigint }).lastInsertRowid ?? 0,

@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS instances (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT NOT NULL REFERENCES tasks(id),
   input TEXT NOT NULL,           -- JSON input
+  cwd TEXT,                      -- absolute invocation directory; NULL on legacy rows
   state TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING, RUNNING, SUCCESS, FAILED
   attempt INTEGER NOT NULL DEFAULT 1,
   exit_code INTEGER,
@@ -101,6 +102,7 @@ export interface InstanceRow {
   id: number;
   task_id: string;
   input: string;
+  cwd: string | null;
   state: InstanceState;
   attempt: number;
   exit_code: number | null;

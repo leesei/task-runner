@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "input": {
+      "type": "string",
+      "format": "path",
+      "description": "Source video file (absolute, or relative to the invocation directory)"
+    },
+    "output": {
+      "type": "string",
+      "format": "path",
+      "description": "Destination video file (absolute, or relative to the invocation directory); must have an extension"
+    },
+    "vbitrate": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Video bitrate in kbps"
+    },
+    "fps": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 120,
+      "default": 24,
+      "description": "Output frame rate"
+    },
+    "acodec": {
+      "type": "string",
+      "enum": ["aac", "copy"],
+      "default": "aac",
+      "description": "Audio codec; copy keeps the source audio stream without re-encoding"
+    },
+    "abitrate": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 96,
+      "description": "Audio bitrate in kbps; ignored when acodec is copy"
+    },
+    "device": {
+      "type": "string",
+      "default": "/dev/dri/renderD128",
+      "description": "VAAPI render device"
+    },
+    "overwrite": {
+      "type": "boolean",
+      "default": false,
+      "description": "Replace an existing output file"
+    }
+  },
+  "required": ["input", "output", "vbitrate"]
+}

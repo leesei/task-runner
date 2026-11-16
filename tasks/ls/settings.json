@@ -11,7 +11,7 @@
   "agents": {
     "daemon": { "logPath": "../logs" },
     "cli": {
-      "argumentHint": "<directory>",
+      "argumentHint": "[directory]",
       "example": "tq add default:ls fixture/1"
     }
   }

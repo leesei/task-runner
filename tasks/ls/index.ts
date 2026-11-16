@@ -15,7 +15,8 @@ export async function ls(filepath: string) {
  * and drive state transitions.
  */
 export async function runWith(ctx: {
-  input: { filepath: string };
+  input: { filepath?: string };
+  cwd: string;
   signal: AbortSignal;
   done: (exitCode: number) => void;
 }) {
@@ -24,7 +25,7 @@ export async function runWith(ctx: {
       ctx.done(124);
       return;
     }
-    const exitCode = await ls(ctx.input.filepath);
+    const exitCode = await ls(ctx.input.filepath ?? ctx.cwd);
     ctx.done(exitCode);
   } catch (err) {
     console.error(err);

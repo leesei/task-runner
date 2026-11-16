@@ -5,15 +5,16 @@ Lists the contents of a directory using the system `ls` command.
 ## Usage
 
 ```sh
+tq add default:ls              # list the directory you added from
 tq add default:ls <directory>
 tq add default:ls '{"filepath":"fixture/1"}'
 ```
 
 ## Input
 
-| Field    | Type   | Required | Description             |
-|----------|--------|----------|-------------------------|
-| filepath | string | yes      | Directory path to list  |
+| Field    | Type   | Required | Description                                      |
+|----------|--------|----------|--------------------------------------------------|
+| filepath | string | no       | Directory path to list; defaults to `ctx.cwd`     |
 
 ## Settings
 

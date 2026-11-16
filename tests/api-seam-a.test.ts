@@ -235,6 +235,56 @@ describe("Seam A: Daemon HTTP API", () => {
     expect(body.task).toBe("default:success");
   });
 
+  test("enqueue stores the default and explicit working directory", async () => {
+    const target = join(projectDir, "workdir");
+    mkdirSync(target, { recursive: true });
+
+    const explicitRes = await fetch(`${baseUrl}/api/instances`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task: "default:success", input: {}, cwd: target }),
+    });
+    expect(explicitRes.status).toBe(200);
+    const explicit = (await explicitRes.json()) as { id: number; cwd: string };
+    expect(explicit.cwd).toBe(target);
+
+    const defaultRes = await fetch(`${baseUrl}/api/instances`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task: "default:success", input: {} }),
+    });
+    expect(defaultRes.status).toBe(200);
+    const fallback = (await defaultRes.json()) as { cwd: string };
+    expect(fallback.cwd).toBe(projectDir);
+
+    const detailRes = await fetch(`${baseUrl}/api/instances/${explicit.id}`);
+    const detail = (await detailRes.json()) as { cwd: string };
+    expect(detail.cwd).toBe(target);
+
+    const listRes = await fetch(
+      `${baseUrl}/api/queues/default:success/instances`,
+    );
+    const list = (await listRes.json()) as Array<{ cwd: string }>;
+    expect(list.some((instance) => instance.cwd === target)).toBe(true);
+  });
+
+  test("invalid cwd is rejected without creating an instance", async () => {
+    const before = harness.core.listInstances("default:validated").length;
+    const res = await fetch(`${baseUrl}/api/instances`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: "default:validated",
+        input: {},
+        cwd: "relative/path",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe("INVALID_CWD");
+    expect(harness.core.listInstances("default:validated").length).toBe(before);
+  });
+
   test("unknown task id returns error", async () => {
     const res = await fetch(`${baseUrl}/api/instances`, {
       method: "POST",

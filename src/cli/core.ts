@@ -47,6 +47,7 @@ export function openCliCore(
     db,
     events: silentSink,
     logDir: config.logDir,
+    defaultCwd: options.projectRoot ?? process.cwd(),
   });
   const core = createCore({
     db,

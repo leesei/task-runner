@@ -26,6 +26,7 @@ export function createHarness(
     db,
     events,
     logDir: resolveDataDir(dataDir).logDir,
+    defaultCwd: projectRoot,
   });
   const core = createCore({ db, lifecycle, projectRoot, dataDir });
   return { lifecycle, core, events };

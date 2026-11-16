@@ -228,6 +228,11 @@ observable task:
   `name:=value` is a usage error (exit 2). `name=value` always produces a string.
 - The stored context is always the normalized JSON value after CLI path resolution. The task
   receives that parsed value in its execution context.
+- Every task instance also stores a **working directory**: the absolute directory the instance
+  was enqueued from. `tq add` records the invocation directory automatically. The HTTP enqueue
+  accepts an optional absolute `cwd` and defaults to the daemon's project root; a relative,
+  missing, or non-directory value is rejected with `INVALID_CWD` before any instance is
+  created. The directory is instance metadata, not part of the task input.
 
 ### D5 — Execution contract and log capture
 
@@ -236,11 +241,13 @@ The context passed to a task instance is the shape the sample tasks already impl
 ```ts
 interface ExecutionContext<TInput> {
   input: TInput;
+  cwd: string;
   signal: AbortSignal;
   done: (exitCode: number) => void;
 }
 ```
 
+- `cwd` is the instance's absolute working directory (see D4). It is stable for the whole instance and is the only correct base for relative filesystem, shell, and subprocess work. The runner never calls `process.chdir()`: tasks are async and concurrent, so a process-global directory would be observed by another task after an `await`. If the directory no longer exists when the instance starts, the instance fails with reason `cwd_not_found` and the task is not invoked.
 - The runner calls the task's default export, awaits it, and treats completion as success.
   Calling `done(0)` completes successfully; calling `done(nonZero)` or throwing marks FAILED.
   A task that returns without calling `done` is treated as exit code 0. The first terminal
@@ -384,9 +391,9 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
   violation.
 - The enqueue core result includes the instance id and its persisted creation timestamp, so
   `add` can print both without a second lookup or an HTTP round trip.
-- `add` prints the instance id, creation time, task id, and normalized context to stdout:
-  `Enqueued instance <id> at <ISO-8601 UTC>`, followed by `Task: <task-id>` and
-  `Context: <compact JSON>`. The timestamp is the instance's persisted creation time.
+- `add` prints the instance id, creation time, task id, normalized context, and working directory to stdout:
+  `Enqueued instance <id> at <ISO-8601 UTC>`, followed by `Task: <task-id>`,
+  `Context: <compact JSON>`, and `Working directory: <absolute path>`. The timestamp is the instance's persisted creation time.
 - `-v` / `--verbose` is a global, repeatable CLI flag. Diagnostics go to stderr so stdout stays
   machine-readable. Level 1 prints the resolved project and data directory, task id, and
   normalized context; level 2 also prints the schema path/body and database path. Normal
@@ -444,7 +451,10 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
 
 - `POST /api/instances` returns 400 `INPUT_SCHEMA_VIOLATION` with `{ code, message, issues }`
   when the context does not match the task schema, and creates no instance. Unknown tasks
-  return 404 `TASK_NOT_FOUND`; malformed JSON returns 400 `INVALID_JSON`.
+  return 404 `TASK_NOT_FOUND`; malformed JSON returns 400 `INVALID_JSON`. The body accepts an
+  optional absolute `cwd`; omitting it uses the daemon's project root, and an invalid value
+  returns 400 `INVALID_CWD` without creating an instance. Instance detail and queue instance
+  listings include `cwd`.
 - The HTTP API does not resolve `format: "path"` values. API clients send absolute paths when
   a task requires them.
 - Queue id is the task id (`namespace:id`). Unknown queue or instance ids return a

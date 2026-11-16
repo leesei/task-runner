@@ -50,6 +50,8 @@ function coreErrorResponse(err: unknown): Response {
       return jsonError(err.code, err.message, 404);
     case "INPUT_SCHEMA_VIOLATION":
       return jsonError(err.code, err.message, 400, err.issues ?? []);
+    case "INVALID_CWD":
+      return jsonError(err.code, err.message, 400);
     case "CLEAR_REFUSED_RUNNING":
       return new Response(
         JSON.stringify({
@@ -138,6 +140,7 @@ export function createApi(h: ApiHandlers) {
         created_at: instance.created_at,
         started_at: instance.started_at,
         ended_at: instance.ended_at,
+        cwd: instance.cwd,
         input: JSON.parse(instance.input),
       })),
     );
@@ -191,10 +194,20 @@ export function createApi(h: ApiHandlers) {
     }
   }
 
-  function handleEnqueueInstance(body: { task: string; input: unknown }): Response {
+  function handleEnqueueInstance(body: {
+    task: string;
+    input: unknown;
+    cwd?: string;
+  }): Response {
     try {
-      const result = core.enqueue(body.task, body.input);
-      return json({ id: result.id, task: body.task, input: result.input, createdAt: result.createdAt });
+      const result = core.enqueue(body.task, body.input, { cwd: body.cwd });
+      return json({
+        id: result.id,
+        task: body.task,
+        input: result.input,
+        cwd: result.cwd,
+        createdAt: result.createdAt,
+      });
     } catch (err) {
       return coreErrorResponse(err);
     }
@@ -216,6 +229,7 @@ export function createApi(h: ApiHandlers) {
       created_at: instance.created_at,
       started_at: instance.started_at,
       ended_at: instance.ended_at,
+      cwd: instance.cwd,
       input: JSON.parse(instance.input),
     });
   }
@@ -331,13 +345,17 @@ export function createApi(h: ApiHandlers) {
   }
 
   async function handleEnqueue(req: Request): Promise<Response> {
-    let body: { task: string; input: unknown };
+    let body: { task: string; input: unknown; cwd?: string };
     try {
       const parsed = await req.json();
       if (!parsed || typeof (parsed as { task?: unknown }).task !== "string") {
         return jsonError("INVALID_REQUEST", "Request body must be { task: string, input: any }", 400);
       }
-      body = parsed as { task: string; input: unknown };
+      const cwd = (parsed as { cwd?: unknown }).cwd;
+      if (cwd !== undefined && typeof cwd !== "string") {
+        return jsonError("INVALID_REQUEST", "cwd must be an absolute path string", 400);
+      }
+      body = parsed as { task: string; input: unknown; cwd?: string };
     } catch {
       return jsonError("INVALID_JSON", "Request body must be valid JSON", 400);
     }

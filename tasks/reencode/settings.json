@@ -1,0 +1,18 @@
+{
+  "namespace": "default",
+  "id": "reencode",
+  "name": "Reencode to HEVC (VAAPI)",
+  "description": "Reencode a video to HEVC using hardware VAAPI encoding, with configurable frame rate and bitrates",
+  "concurrency": 1,
+  "timeoutMs": 1800000,
+  "inputSchema": "schema.json",
+  "env": {},
+  "category": "media",
+  "agents": {
+    "daemon": { "logPath": "../logs" },
+    "cli": {
+      "argumentHint": "input=<path> output=<path> vbitrate:=<kbps> [fps:=24] [acodec=aac|copy] [abitrate:=96]",
+      "example": "tq add default:reencode input=in.mp4 output=out.mp4 vbitrate:=850"
+    }
+  }
+}

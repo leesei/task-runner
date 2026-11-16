@@ -65,7 +65,8 @@ export async function commandAdd(
     if (verbose >= 1) {
       console.error(`Resolved task: ${taskId}`);
       console.error(`Resolved data directory: ${dataDir}`);
-      console.error(`Project root: ${cwd}`);
+      console.error(`Project root: ${projectRoot}`);
+      console.error(`Working directory: ${cwd}`);
     }
     if (verbose >= 2) {
       console.error(`Database path: ${cli.config.dbPath}`);
@@ -88,14 +89,19 @@ export async function commandAdd(
       console.error(`Normalized context: ${JSON.stringify(input)}`);
     }
 
-    const result = cli.core.enqueue(taskId, input);
+    const result = cli.core.enqueue(taskId, input, { cwd });
     console.log(`Enqueued instance ${result.id} at ${result.createdAt}`);
     console.log(`Task: ${taskId}`);
     console.log(`Context: ${JSON.stringify(result.input)}`);
+    console.log(`Working directory: ${result.cwd}`);
     return 0;
   } catch (err: any) {
     if (err instanceof CoreError && err.code === "TASK_NOT_FOUND") {
       console.error(`Task not found: ${taskId}`);
+      return 2;
+    }
+    if (err instanceof CoreError && err.code === "INVALID_CWD") {
+      console.error(`Invalid working directory: ${err.message}`);
       return 2;
     }
     if (err instanceof CoreError && err.code === "INPUT_SCHEMA_VIOLATION") {

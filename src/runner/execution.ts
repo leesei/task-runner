@@ -8,6 +8,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { statSync } from "node:fs";
 import type { Claim, Lifecycle, RunOutcome } from "../core/lifecycle.ts";
 import { appendLogLine, ensureLogFile } from "../db/logs.ts";
 
@@ -15,6 +16,8 @@ import { appendLogLine, ensureLogFile } from "../db/logs.ts";
 
 export interface ExecutionContext<TInput = unknown> {
   input: TInput;
+  /** Absolute working directory of the instance; never the process cwd. */
+  cwd: string;
   signal: AbortSignal;
   done: (exitCode: number) => void;
 }
@@ -139,6 +142,7 @@ export async function executeTask(
 
   const ctx: ExecutionContext = {
     input: claim.input,
+    cwd: claim.cwd,
     signal,
     done: (exitCode: number) => {
       if (completed) {
@@ -166,6 +170,22 @@ export async function executeTask(
     }
   };
   signal.addEventListener("abort", onAbort, { once: true });
+
+  // The directory is per-instance data. The runner never changes the process
+  // cwd: another task could observe it after an await. A directory that has
+  // disappeared since enqueue is an explicit failure, not a silent fallback.
+  try {
+    if (!statSync(claim.cwd).isDirectory()) {
+      throw new Error("not a directory");
+    }
+  } catch {
+    const message = `Task ${claim.taskId}: working directory not available: ${claim.cwd}`;
+    appendLogLine(claim.logPath, "stderr", message);
+    console.error(message);
+    finish({ kind: "failure", exitCode: 1, reason: "cwd_not_found" });
+    signal.removeEventListener("abort", onAbort);
+    return;
+  }
 
   if (claim.timeoutMs > 0) {
     timeoutHandle = setTimeout(() => {

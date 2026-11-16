@@ -6,10 +6,12 @@ import catTask from "../tasks/cat/index.ts";
 import envTask from "../tasks/env/index.ts";
 import lsTask from "../tasks/ls/index.ts";
 import minfoTask from "../tasks/minfo/index.ts";
+import reencodeTask from "../tasks/reencode/index.ts";
 import sha256Task from "../tasks/sha256/index.ts";
 
 type TaskFn = (ctx: {
   input: unknown;
+  cwd: string;
   signal: AbortSignal;
   done: (exitCode: number) => void;
 }) => Promise<void>;
@@ -20,6 +22,7 @@ const TASKS: Record<string, TaskFn> = {
   env: envTask as TaskFn,
   sha256: sha256Task as TaskFn,
   minfo: minfoTask as TaskFn,
+  reencode: reencodeTask as TaskFn,
 };
 
 const FILE_TASKS = ["ls", "cat", "sha256", "minfo"];
@@ -32,7 +35,7 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
-async function runTask(task: TaskFn, input: unknown) {
+async function runTask(task: TaskFn, input: unknown, cwd = process.cwd()) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const originalLog = console.log;
@@ -49,6 +52,7 @@ async function runTask(task: TaskFn, input: unknown) {
   try {
     await task({
       input,
+      cwd,
       signal: new AbortController().signal,
       done: (code: number) => {
         exitCode = code;
@@ -99,9 +103,28 @@ describe("sample task definitions", () => {
       expect(schema.type).toBe("object");
       expect(schema.properties.filepath.type).toBe("string");
       expect(schema.properties.filepath.format).toBe("path");
-      expect(schema.required).toContain("filepath");
+      if (name === "ls") {
+        expect(schema.required ?? []).not.toContain("filepath");
+      } else {
+        expect(schema.required).toContain("filepath");
+      }
     });
   }
+
+  test("reencode schema requires both paths and a video bitrate", () => {
+    const schema = JSON.parse(
+      readFileSync(join(process.cwd(), "tasks", "reencode", "schema.json"), "utf-8"),
+    );
+    expect(schema.type).toBe("object");
+    expect(schema.required).toEqual(
+      expect.arrayContaining(["input", "output", "vbitrate"]),
+    );
+    expect(schema.properties.input.format).toBe("path");
+    expect(schema.properties.output.format).toBe("path");
+    expect(schema.properties.acodec.enum).toEqual(["aac", "copy"]);
+    expect(schema.properties.fps.default).toBe(24);
+    expect(schema.properties.overwrite.default).toBe(false);
+  });
 
   test("env schema takes an optional filter and values flag", () => {
     const schema = JSON.parse(
@@ -125,6 +148,15 @@ describe("ls", () => {
     const missing = await runTask(TASKS.ls!, { filepath: join(dir, "does-not-exist") });
     expect(missing.exitCode).not.toBe(0);
     expect(missing.stderr.toLowerCase()).toContain("no such file");
+  });
+
+  test("defaults to the instance working directory", async () => {
+    const dir = makeTempDir("tq-ls-cwd-");
+    writeFileSync(join(dir, "from-cwd.txt"), "");
+
+    const result = await runTask(TASKS.ls!, {}, dir);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("from-cwd.txt");
   });
 });
 

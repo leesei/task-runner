@@ -10,6 +10,16 @@ A self-describing definition discovered from a search path: a folder with an ent
 
 One enqueued execution of a task. Carries normalized input, attempt number, state (`PENDING`, `RUNNING`, `SUCCESS`, `FAILED`), timings, exit code, failure reason, and log path. Referred to by its numeric id. The attempt number is also the completion fence: a finish applies only to the running attempt it was claimed from.
 
+## Context
+
+The JSON value accepted by `tq add` and the HTTP enqueue, validated against the task's input schema, and stored on the task instance as its input. Defaults and, for the CLI, absolute paths are part of the stored context.
+
+_Avoid_: payload, parameters, arguments
+
+## Working directory
+
+The absolute directory a task instance was enqueued from, stored on the instance and passed to the task as `ctx.cwd`. Distinct from the project root, which is where task discovery happens, and from the daemon's process directory, which the runner never changes. Instances created before the field existed fall back to the daemon's project root.
+
 ## Queue
 
 The single FIFO lane for a task definition. The queue id equals the task id. State is `IDLE`, `PROCESSING`, or `STOPPED`; concurrency caps how many instances may be `RUNNING`.

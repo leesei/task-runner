@@ -69,6 +69,7 @@ interface Claim extends ClaimToken {
   entryPoint: string;
   timeoutMs: number;
   input: unknown;
+  cwd: string;
   logPath: string;
 }
 
@@ -96,7 +97,7 @@ interface ClearResult {
 }
 
 interface Lifecycle {
-  enqueue(taskId: string, input: unknown): { id: number; createdAt: string };
+  enqueue(taskId: string, input: unknown, cwd?: string): { id: number; createdAt: string };
   claim(): Claim[];
   claimQueue(queueId: string): Claim[];
   finishRun(token: ClaimToken, outcome: RunOutcome): FinishResult;
@@ -155,8 +156,10 @@ from any state. `start` targets `PROCESSING` when there is pending or running
 work, and `IDLE` when there is nothing to do. Same-state calls are no-ops.
 
 `enqueue` trusts its input. Input validation stays in core, before the
-lifecycle call. `enqueue` ensures the queue exists, inserts the instance, and
-moves an `IDLE` queue to `PROCESSING` in the same transaction.
+lifecycle call. `enqueue` ensures the queue exists, inserts the instance with
+its working directory, and moves an `IDLE` queue to `PROCESSING` in the same
+transaction. A missing working directory on a legacy row is resolved to the
+lifecycle's `defaultCwd` when the instance is claimed.
 
 `syncQueues` ensures one queue per task and updates concurrency for existing
 queues. It never deletes. Queue retirement is deferred until the historical

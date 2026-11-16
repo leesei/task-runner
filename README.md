@@ -44,4 +44,4 @@ table of exports
 - `docs/DESIGN.md`: how the daemon, database and each sub command works — protocol mechanics, design choices, internals, limitations, references
 - `docs/adr/`: Architecture Decision Record (ADR)
 - `GLOSSARY.md`: the project's vocabulary
-- `.scratch/issues/`: implementation task to be completed
+- `.scratch/<feature>/issues/`: implementation task to be completed

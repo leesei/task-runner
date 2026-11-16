@@ -24,7 +24,8 @@ import {
   insertControlRequest,
 } from "../db/queries.ts";
 import type { ControlToken } from "../db/queries.ts";
-import { unlinkSync } from "node:fs";
+import { statSync, unlinkSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import type {
   InstanceRow,
   InstanceState,
@@ -78,6 +79,16 @@ export interface EnqueueResult {
   createdAt: string;
   /** Normalized context after schema defaults and CLI path resolution. */
   input: unknown;
+  /** Absolute working directory the instance will run in. */
+  cwd: string;
+}
+
+export interface EnqueueOptions {
+  /**
+   * Absolute directory to run the instance in. Defaults to the core's
+   * project root. Relative values are rejected; adapters resolve them.
+   */
+  cwd?: string;
 }
 
 export interface AbortOutcome {
@@ -98,7 +109,7 @@ export interface ReloadResult {
 }
 
 export interface Core {
-  enqueue(taskId: string, input: unknown): EnqueueResult;
+  enqueue(taskId: string, input: unknown, options?: EnqueueOptions): EnqueueResult;
   getTaskInputSchema(taskId: string): object | null;
 
   listQueues(): QueueSummary[];
@@ -178,16 +189,50 @@ function queueSummary(db: DB, queueId: string): QueueSummary | null {
   return queue ? summaryFromQueue(db, queue) : null;
 }
 
+function resolveWorkingDirectory(
+  requested: string | undefined,
+  projectRoot: string,
+): string {
+  if (requested === undefined) return resolve(projectRoot);
+
+  if (!isAbsolute(requested)) {
+    throw new CoreError(
+      "INVALID_CWD",
+      `Working directory must be absolute: ${requested}`,
+    );
+  }
+
+  let stats;
+  try {
+    stats = statSync(requested);
+  } catch {
+    throw new CoreError(
+      "INVALID_CWD",
+      `Working directory does not exist: ${requested}`,
+    );
+  }
+  if (!stats.isDirectory()) {
+    throw new CoreError(
+      "INVALID_CWD",
+      `Working directory is not a directory: ${requested}`,
+    );
+  }
+
+  return resolve(requested);
+}
+
 export function createCore(config: CoreConfig): Core {
   const { db, lifecycle, projectRoot, dataDir } = config;
   const controlTimeoutMs = config.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
 
   return {
-    enqueue(taskId, input) {
+    enqueue(taskId, input, options = {}) {
       const task = getTask(db, taskId);
       if (!task) {
         throw new CoreError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
       }
+
+      const cwd = resolveWorkingDirectory(options.cwd, projectRoot);
 
       // Validate before touching queue or instance state: a violation creates
       // no instance. CLI and HTTP share this path, so they cannot disagree.
@@ -200,8 +245,8 @@ export function createCore(config: CoreConfig): Core {
         );
       }
 
-      const result = lifecycle.enqueue(taskId, value);
-      return { ...result, input: value };
+      const result = lifecycle.enqueue(taskId, value, cwd);
+      return { ...result, input: value, cwd };
     },
 
     getTaskInputSchema(taskId) {

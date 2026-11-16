@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -175,6 +175,7 @@ describe("Seam B: CLI subprocess", () => {
     expect(stdout).toMatch(/Enqueued instance \d+ at \d{4}-\d{2}-\d{2}T/);
     expect(stdout).toContain("Task: default:echo");
     expect(stdout).toContain("Context:");
+    expect(stdout).toContain(`Working directory: ${projectDir}`);
   });
 
   test("tq add supports escaped JSON, @file, name=value, and name:=value", async () => {
@@ -598,6 +599,75 @@ export default async function(ctx: any) {
       await proc.exited;
       expect(proc.exitCode).toBe(0);
       expect(stdout).toContain("STOPPED");
+    } finally {
+      daemon.kill("SIGTERM");
+      await daemon.exited.catch(() => {});
+      rmSync(liveData, { recursive: true, force: true });
+      rmSync(liveProject, { recursive: true, force: true });
+    }
+  });
+
+  test("tq add records the invocation directory and the daemon runs there", async () => {
+    const liveData = makeTempDir();
+    const liveProject = makeTempDir();
+    const nested = join(liveProject, "nested", "deeper");
+    mkdirSync(nested, { recursive: true });
+    const marker = join(liveProject, "cwd.marker");
+
+    writeTask(liveProject, "where", {
+      "settings.json": JSON.stringify({
+        namespace: "default",
+        id: "where",
+        name: "Where",
+        concurrency: 1,
+      }),
+      "index.ts": `import { writeFileSync } from "node:fs";
+export default async function(ctx: any) {
+  console.log(ctx.cwd);
+  writeFileSync(ctx.input.marker, ctx.cwd);
+  ctx.done(0);
+}`,
+      "README.md": "# where",
+    });
+
+    const env = { ...process.env, TQ_DATA_DIR: liveData };
+
+    // Enqueue offline from a nested directory.
+    let proc = Bun.spawn(
+      [TQ_BIN, "add", "default:where", JSON.stringify({ marker })],
+      { cwd: nested, env, stdout: "pipe", stderr: "pipe" },
+    );
+    let stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(proc.exitCode).toBe(0);
+    expect(stdout).toContain(`Working directory: ${nested}`);
+    const instanceId = stdout.match(/Enqueued instance (\d+)/)?.[1];
+    expect(instanceId).toBeTruthy();
+
+    // Start the daemon from the project root; the instance must keep the
+    // directory it was added from.
+    const daemon = Bun.spawn([TQ_BIN, "daemon", "--port", "0"], {
+      cwd: liveProject,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    try {
+      expect(await waitForFile(join(liveData, "daemon.json"))).toBe(true);
+      expect(await waitForFile(marker)).toBe(true);
+      expect(readFileSync(marker, "utf-8")).toBe(nested);
+
+      proc = Bun.spawn([TQ_BIN, "logs", instanceId!], {
+        cwd: liveProject,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      stdout = await new Response(proc.stdout).text();
+      await proc.exited;
+      expect(proc.exitCode).toBe(0);
+      expect(stdout).toContain(nested);
     } finally {
       daemon.kill("SIGTERM");
       await daemon.exited.catch(() => {});

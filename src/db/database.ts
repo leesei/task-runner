@@ -48,6 +48,11 @@ function migrate(db: DB): void {
   } catch {
     // Column already exists.
   }
+  try {
+    db.exec("ALTER TABLE instances ADD COLUMN cwd TEXT");
+  } catch {
+    // Column already exists.
+  }
 }
 
 export function openDatabase(dbPath: string): DB {
@@ -77,6 +82,11 @@ export function configureDatabase(db: DB): void {
   }
   try {
     db.exec("ALTER TABLE control_requests ADD COLUMN claim_tokens TEXT");
+  } catch {
+    // Column already exists or another non-fatal error — skip
+  }
+  try {
+    db.exec("ALTER TABLE instances ADD COLUMN cwd TEXT");
   } catch {
     // Column already exists or another non-fatal error — skip
   }
