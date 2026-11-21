@@ -1,0 +1,1495 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tq dashboard</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #111827;
+        --border: #1f2937;
+        --text: #e5e7eb;
+        --muted: #9ca3af;
+        --accent: #38bdf8;
+        --success: #22c55e;
+        --failed: #f87171;
+        --running: #f59e0b;
+        --pending: #94a3b8;
+      }
+      * { box-sizing: border-box; }
+      html {
+        /* Keep the layout width stable when the log panel toggles the page
+           scrollbar, so selecting an instance does not shift the page. */
+        scrollbar-gutter: stable;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+      }
+      header {
+        padding: 16px 24px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+      }
+      header .status {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      main {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+        padding: 16px 24px 32px;
+      }
+      .instance-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 16px;
+        align-items: start;
+      }
+      .instance-grid.with-context {
+        grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+      }
+      @media (max-width: 700px) {
+        .instance-grid.with-context {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      /* Show about ten instance rows, then scroll the rest. The section header
+         stays put and the table header sticks inside the scroller. */
+      .table-scroll {
+        max-height: 425px;
+        overflow: auto;
+      }
+      #instances-table th,
+      #instances-table td {
+        padding-left: 12px;
+        padding-right: 12px;
+      }
+      .table-scroll thead th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: var(--panel);
+      }
+      #instances-table th:nth-child(6),
+      #instances-table td:nth-child(6) {
+        white-space: nowrap;
+      }
+      #context-section {
+        position: sticky;
+        top: 16px;
+      }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      section header {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      section header h2 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      #instances-section header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+      }
+      #instances-section header h2 {
+        white-space: nowrap;
+      }
+      .instances-tools {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-left: auto;
+      }
+      #instances-queue-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      #instances-search {
+        width: 220px;
+        max-width: 100%;
+        padding: 5px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #0b1026;
+        color: var(--text);
+        font-size: 12px;
+      }
+      #instances-search::placeholder {
+        color: var(--muted);
+      }
+      #instances-search:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th, td {
+        text-align: left;
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      th {
+        color: var(--muted);
+        font-weight: 500;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      tbody tr:hover {
+        background: rgba(56, 189, 248, 0.05);
+        cursor: pointer;
+      }
+      tbody tr {
+        user-select: none;
+      }
+      tbody tr.selected { background: rgba(56, 189, 248, 0.12); }
+      tbody tr:focus { outline: none; }
+      tbody tr:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+      }
+      button:focus-visible,
+      a:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      tbody tr.empty-row td {
+        color: var(--muted);
+        text-align: center;
+        cursor: default;
+      }
+      tbody tr.empty-row:hover { background: transparent; }
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0 6px;
+        border-radius: 999px;
+        font-size: 11px;
+        border: 1px solid var(--border);
+        color: var(--muted);
+      }
+      .badge.running { color: var(--running); border-color: rgba(245, 158, 11, 0.4); }
+      .badge.success { color: var(--success); border-color: rgba(34, 197, 94, 0.4); }
+      .badge.failed { color: var(--failed); border-color: rgba(248, 113, 113, 0.4); }
+      .badge.pending { color: var(--pending); }
+      .badge.processing { color: var(--accent); }
+      .badge.stopped { color: var(--muted); }
+      .badge.idle { color: var(--muted); }
+      .actions {
+        display: flex;
+        gap: 8px;
+      }
+      button.action-btn {
+        min-width: 28px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.3;
+        text-align: center;
+        cursor: pointer;
+      }
+      button.action-btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+        background: rgba(56, 189, 248, 0.12);
+      }
+      button.action-btn.pause {
+        color: var(--running);
+        border-color: rgba(245, 158, 11, 0.4);
+      }
+      button.action-btn.pause:hover {
+        border-color: var(--running);
+        color: var(--running);
+        background: rgba(245, 158, 11, 0.12);
+      }
+      button.action-btn.resume {
+        color: var(--success);
+        border-color: rgba(34, 197, 94, 0.4);
+      }
+      button.action-btn.resume:hover {
+        border-color: var(--success);
+        color: var(--success);
+        background: rgba(34, 197, 94, 0.12);
+      }
+      button.action-btn.danger {
+        color: var(--failed);
+        border-color: rgba(248, 113, 113, 0.5);
+      }
+      button.action-btn.danger:hover {
+        border-color: var(--failed);
+        color: var(--failed);
+        background: rgba(248, 113, 113, 0.12);
+      }
+      button.delete-btn {
+        min-width: 28px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        border: 1px solid rgba(248, 113, 113, 0.5);
+        background: transparent;
+        color: var(--failed);
+        font-size: 13px;
+        line-height: 1.3;
+        text-align: center;
+        cursor: pointer;
+      }
+      button.delete-btn:hover {
+        background: rgba(248, 113, 113, 0.12);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 16px;
+      }
+      .log-panel {
+        padding: 16px;
+        max-height: 420px;
+        overflow: auto;
+        background: #0b1026;
+        font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .log-line {
+        display: flex;
+        gap: 12px;
+      }
+      .log-line .ts { color: var(--muted); }
+      .log-line.stderr .text { color: var(--failed); }
+      .context-panel {
+        padding: 12px 16px;
+        max-height: 420px;
+        overflow: auto;
+        background: #0b1026;
+        font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+      }
+      .context-panel pre {
+        margin: 0;
+        font-family: inherit;
+        font-size: inherit;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .context-meta {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 8px;
+      }
+      .context-meta-label {
+        margin-bottom: 2px;
+      }
+      .context-meta-value {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        color: var(--text);
+      }
+      .context-meta-path {
+        min-width: 0;
+        word-break: break-word;
+      }
+      button.copy-btn {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      button.copy-btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      button.copy-btn.copied {
+        border-color: var(--success);
+        color: var(--success);
+      }
+      .context-empty {
+        color: var(--muted);
+      }
+      .hidden { display: none; }
+      a.link { color: var(--accent); text-decoration: none; }
+      kbd.hotkey {
+        display: inline-block;
+        padding: 0 5px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--muted);
+        font-family: inherit;
+        font-size: 10px;
+        font-weight: 500;
+        line-height: 16px;
+        vertical-align: middle;
+      }
+      .header-tools {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .help-open {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid var(--border);
+        border-radius: 50%;
+        background: transparent;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .help-open:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .help-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(2, 6, 23, 0.7);
+      }
+      .help-overlay.hidden { display: none; }
+      .help-dialog {
+        width: min(440px, 100%);
+        max-height: 100%;
+        overflow: auto;
+        padding: 16px 20px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+      }
+      .help-dialog header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 0 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .help-dialog h2 {
+        margin: 0;
+        font-size: 15px;
+      }
+      #help-close {
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      #help-close:hover {
+        border-color: var(--failed);
+        color: var(--failed);
+      }
+      .help-list {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 8px 16px;
+        margin: 14px 0 0;
+        font-size: 13px;
+      }
+      .help-list dt {
+        margin: 0;
+        white-space: nowrap;
+      }
+      .help-list dd {
+        margin: 0;
+        color: var(--muted);
+      }
+      .log-panel:focus { outline: none; }
+      .log-panel:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>tq dashboard</h1>
+      <div class="header-tools">
+        <button
+          type="button"
+          id="help-open"
+          class="help-open"
+          title="Keyboard shortcuts"
+          aria-label="Keyboard shortcuts"
+        >?</button>
+        <div class="status" id="connection-status">connecting...</div>
+      </div>
+    </header>
+    <main>
+      <section>
+        <header>
+          <h2>Queues <kbd class="hotkey">q</kbd></h2>
+        </header>
+        <table id="queues-table">
+          <thead>
+            <tr>
+              <th>Id</th>
+              <th>Name</th>
+              <th>Category</th>
+              <th>State</th>
+              <th>Concurrency</th>
+              <th>Running</th>
+              <th>Pending</th>
+              <th>Succeeded</th>
+              <th>Failed</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+      <div class="instance-grid" id="instance-grid">
+        <section id="instances-section" class="hidden">
+          <header>
+            <h2>Instances · <span id="instances-queue"></span> <kbd class="hotkey">i</kbd></h2>
+            <div class="instances-tools">
+              <div class="actions" id="instances-queue-actions"></div>
+              <input
+                id="instances-search"
+                type="search"
+                placeholder="Filter user id or working directory"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+          </header>
+          <div class="table-scroll">
+            <table id="instances-table">
+              <thead>
+                <tr>
+                  <th>Id</th>
+                  <th>User id</th>
+                  <th>State</th>
+                  <th>Exit code</th>
+                  <th>Duration</th>
+                  <th>Enqueue time</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+        <section id="context-section" class="hidden">
+          <header>
+            <h2>Instance context · <span id="context-instance"></span></h2>
+          </header>
+          <div class="context-panel" id="context-panel"></div>
+        </section>
+      </div>
+      <section id="log-section" class="hidden">
+        <header>
+          <h2>Instance log · <span id="log-instance"></span> <kbd class="hotkey">l</kbd></h2>
+        </header>
+        <div class="log-panel" id="log-panel" tabindex="0" aria-label="Instance log"></div>
+      </section>
+    </main>
+    <div
+      class="help-overlay hidden"
+      id="help-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="help-title"
+    >
+      <div class="help-dialog">
+        <header>
+          <h2 id="help-title">Keyboard shortcuts</h2>
+          <button type="button" id="help-close" aria-label="Close help" title="Close">✕</button>
+        </header>
+        <dl class="help-list">
+          <dt><kbd class="hotkey">q</kbd></dt>
+          <dd>Focus the Queues table</dd>
+          <dt><kbd class="hotkey">i</kbd></dt>
+          <dd>Focus the Instances table</dd>
+          <dt><kbd class="hotkey">l</kbd></dt>
+          <dd>Focus the instance log</dd>
+          <dt><kbd class="hotkey">/</kbd></dt>
+          <dd>Focus the instance filter</dd>
+          <dt><kbd class="hotkey">↑</kbd> <kbd class="hotkey">↓</kbd></dt>
+          <dd>Move between rows or scroll the log</dd>
+          <dt><kbd class="hotkey">Home</kbd> <kbd class="hotkey">End</kbd></dt>
+          <dd>First/last row, or top/bottom of the log</dd>
+          <dt><kbd class="hotkey">Enter</kbd> <kbd class="hotkey">Space</kbd></dt>
+          <dd>Select the focused row</dd>
+          <dt><kbd class="hotkey">Esc</kbd></dt>
+          <dd>Clear the filter or close this help</dd>
+          <dt><kbd class="hotkey">?</kbd></dt>
+          <dd>Show this help</dd>
+        </dl>
+      </div>
+    </div>
+    <script>
+      const state = {
+        queues: new Map(),
+        tasks: new Map(),
+        instances: new Map(),
+        selectedQueue: null,
+        selectedInstance: null,
+        queueActionsKey: null,
+        contextKey: null,
+      };
+
+      const queuesTableBody = document.querySelector("#queues-table tbody");
+      const instancesSection = document.querySelector("#instances-section");
+      const instancesQueue = document.querySelector("#instances-queue");
+      const instancesQueueActions = document.querySelector(
+        "#instances-queue-actions",
+      );
+      const instancesSearch = document.querySelector("#instances-search");
+      const instancesTableBody = document.querySelector("#instances-table tbody");
+      const instanceGrid = document.querySelector("#instance-grid");
+      const contextSection = document.querySelector("#context-section");
+      const contextInstance = document.querySelector("#context-instance");
+      const contextPanel = document.querySelector("#context-panel");
+      const logSection = document.querySelector("#log-section");
+      const logInstance = document.querySelector("#log-instance");
+      const logPanel = document.querySelector("#log-panel");
+      const connectionStatus = document.querySelector("#connection-status");
+      const helpOverlay = document.querySelector("#help-overlay");
+      const helpOpenButton = document.querySelector("#help-open");
+      const helpCloseButton = document.querySelector("#help-close");
+
+      let helpReturnFocus = null;
+      let queueInstancesRequest = 0;
+
+      // Actions are icon-only; the original labels live on as tooltips and
+      // accessible names. Variation selector 15 asks for text-style glyphs.
+      const ACTION_ICONS = {
+        Pause: "\u23F8\uFE0E",
+        Resume: "\u23F5\uFE0E",
+        Clear: "\u{1F9F9}",
+        "Clear all": "\u{1F5D1}\uFE0E",
+        Delete: "\u2715",
+      };
+
+      function setActionIcon(button, label) {
+        button.textContent = ACTION_ICONS[label] ?? label;
+        button.title = label;
+        button.setAttribute("aria-label", label);
+      }
+
+      function formatDuration(ms) {
+        if (ms === null || ms === undefined) return "-";
+        if (ms < 1000) return ms + "ms";
+        const seconds = Math.floor(ms / 1000);
+        if (seconds < 60) return seconds + "s";
+        const minutes = Math.floor(seconds / 60);
+        const rem = seconds % 60;
+        if (minutes < 60) return minutes + "m" + (rem ? " " + rem + "s" : "");
+        const hours = Math.floor(minutes / 60);
+        const rmin = minutes % 60;
+        return hours + "h" + (rmin ? " " + rmin + "m" : "");
+      }
+
+      function formatTime(ts) {
+        if (!ts) return "-";
+        try {
+          const d = new Date(ts);
+          // Time only keeps the enqueue column narrow enough for ten rows.
+          // The full timestamp is available as the cell's tooltip.
+          return d.toLocaleTimeString(undefined, { timeStyle: "medium" });
+        } catch {
+          return ts;
+        }
+      }
+
+      function formatFullTime(ts) {
+        if (!ts) return "-";
+        try {
+          return new Date(ts).toLocaleString();
+        } catch {
+          return ts;
+        }
+      }
+
+      function displayUserId(inst) {
+        if (inst.user_id) return inst.user_id;
+        const contextId = inst.input && typeof inst.input === "object"
+          ? inst.input.id
+          : undefined;
+        return typeof contextId === "string" && contextId ? contextId : "-";
+      }
+
+      // Keyboard model: rows are focusable list items. Tab moves between the
+      // queues table, the search box and the instances table; arrows move
+      // within a table; Enter or Space activates the focused row.
+      function tableRows(tbody) {
+        return Array.from(tbody.querySelectorAll("tr:not(.empty-row)"));
+      }
+
+      function focusRow(row) {
+        if (!row) return;
+        row.focus();
+        row.scrollIntoView({ block: "nearest" });
+      }
+
+      function enableRowKeyboard(tbody, activate) {
+        tbody.addEventListener("keydown", (ev) => {
+          const row = ev.target.closest("tr");
+          if (!row || row.parentElement !== tbody) return;
+          if (row.classList.contains("empty-row")) return;
+          // Inner buttons keep their own Enter/Space behaviour.
+          if (
+            (ev.key === "Enter" || ev.key === " ") &&
+            ev.target !== row &&
+            ev.target.closest("button")
+          ) {
+            return;
+          }
+          const rows = tableRows(tbody);
+          const index = rows.indexOf(row);
+          if (index === -1) return;
+          let next = null;
+          switch (ev.key) {
+            case "ArrowDown":
+              next = rows[Math.min(index + 1, rows.length - 1)];
+              break;
+            case "ArrowUp":
+              next = rows[Math.max(index - 1, 0)];
+              break;
+            case "Home":
+              next = rows[0];
+              break;
+            case "End":
+              next = rows[rows.length - 1];
+              break;
+            case "Enter":
+            case " ":
+              ev.preventDefault();
+              activate(row);
+              return;
+            default:
+              return;
+          }
+          ev.preventDefault();
+          if (!next) return;
+          focusRow(next);
+          activate(next);
+        });
+      }
+
+      // SSE refreshes rebuild the tables, so put focus back on the row the
+      // user was on instead of dropping it to the document body.
+      function focusedRowKey(tbody, key) {
+        const active = document.activeElement;
+        if (!active || !tbody.contains(active)) return null;
+        const row = active.closest("tr");
+        return row ? row.dataset[key] ?? null : null;
+      }
+
+      function restoreRowFocus(tbody, key, value) {
+        const row = rowByKey(tbody, key, value);
+        if (row) row.focus({ preventScroll: true });
+      }
+
+      function rowByKey(tbody, key, value) {
+        if (value === null || value === undefined || value === "") return null;
+        for (const row of tbody.children) {
+          if (row.dataset[key] === String(value)) return row;
+        }
+        return null;
+      }
+
+      // Region hotkeys focus the list or log so arrows act in it right away.
+      function focusQueueList() {
+        const selected = rowByKey(queuesTableBody, "queueId", state.selectedQueue);
+        focusRow(selected || tableRows(queuesTableBody)[0]);
+      }
+
+      function focusInstanceList() {
+        if (instancesSection.classList.contains("hidden")) return;
+        const selected = rowByKey(
+          instancesTableBody,
+          "instanceId",
+          state.selectedInstance,
+        );
+        focusRow(selected || tableRows(instancesTableBody)[0]);
+      }
+
+      function focusLogPanel() {
+        if (logSection.classList.contains("hidden")) return;
+        logPanel.focus();
+      }
+
+      function enableLogKeyboard() {
+        logPanel.addEventListener("keydown", (ev) => {
+          const page = Math.max(40, logPanel.clientHeight - 40);
+          switch (ev.key) {
+            case "ArrowDown":
+              ev.preventDefault();
+              logPanel.scrollTop += 40;
+              return;
+            case "ArrowUp":
+              ev.preventDefault();
+              logPanel.scrollTop -= 40;
+              return;
+            case "PageDown":
+              ev.preventDefault();
+              logPanel.scrollTop += page;
+              return;
+            case "PageUp":
+              ev.preventDefault();
+              logPanel.scrollTop -= page;
+              return;
+            case "Home":
+              ev.preventDefault();
+              logPanel.scrollTop = 0;
+              return;
+            case "End":
+              ev.preventDefault();
+              logPanel.scrollTop = logPanel.scrollHeight;
+              return;
+          }
+        });
+      }
+
+      function helpIsOpen() {
+        return !helpOverlay.classList.contains("hidden");
+      }
+
+      function openHelp() {
+        if (helpIsOpen()) return;
+        helpReturnFocus = document.activeElement;
+        helpOverlay.classList.remove("hidden");
+        helpCloseButton.focus();
+      }
+
+      function closeHelp() {
+        if (!helpIsOpen()) return;
+        helpOverlay.classList.add("hidden");
+        if (helpReturnFocus && typeof helpReturnFocus.focus === "function") {
+          helpReturnFocus.focus();
+        }
+        helpReturnFocus = null;
+      }
+
+      // The Instances header mirrors the selected queue's row actions, so the
+      // queue can be paused, resumed or cleared without scrolling back up.
+      function renderQueueActions() {
+        const queue = state.selectedQueue
+          ? state.queues.get(state.selectedQueue)
+          : null;
+        const key = queue ? `${queue.id}:${queue.state}` : "";
+        if (key === state.queueActionsKey) return;
+        state.queueActionsKey = key;
+        const hadFocus = instancesQueueActions.contains(document.activeElement);
+        instancesQueueActions.innerHTML = "";
+        if (!queue) return;
+        const paused = queue.state === "STOPPED";
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "action-btn " + (paused ? "resume" : "pause");
+        setActionIcon(toggle, paused ? "Resume" : "Pause");
+        toggle.title = paused
+          ? "Resume processing this queue"
+          : "Pause this queue: the running task finishes, pending tasks stay queued";
+        toggle.addEventListener("click", () => toggleQueue(queue.id, !paused));
+        instancesQueueActions.appendChild(toggle);
+        instancesQueueActions.appendChild(
+          makeActionButton("Clear", `Clear successful instances from ${queue.id}?`, () =>
+            clearQueue(queue.id, false),
+          ),
+        );
+        instancesQueueActions.appendChild(
+          makeActionButton(
+            "Clear all",
+            `Clear all finished instances from ${queue.id}? Refused while any instance is running.`,
+            () => clearQueue(queue.id, true),
+            "danger",
+          ),
+        );
+        if (hadFocus) toggle.focus();
+      }
+
+      // Rows are updated in place rather than rebuilt, which keeps hover and
+      // focus steady and avoids flashing on every snapshot or action.
+      function setText(el, value) {
+        if (!el) return;
+        const text = String(value ?? "");
+        if (el.textContent !== text) el.textContent = text;
+      }
+
+      function createQueueRow(q) {
+        const tr = document.createElement("tr");
+        tr.dataset.queueId = q.id;
+        tr.tabIndex = 0;
+        tr.innerHTML = `
+          <td><a class="link" href="#"></a></td>
+          <td></td>
+          <td></td>
+          <td><span class="badge"></span></td>
+          <td></td>
+          <td></td>
+          <td></td>
+          <td></td>
+          <td></td>
+          <td></td>
+        `;
+        tr.children[0].firstElementChild.textContent = q.id;
+
+        // Queue actions are clicks of their own, so keep them from selecting
+        // the queue.
+        const actions = document.createElement("div");
+        actions.className = "actions";
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "action-btn queue-toggle";
+        setActionIcon(toggle, q.state === "STOPPED" ? "Resume" : "Pause");
+        toggle.title =
+          q.state === "STOPPED"
+            ? "Resume processing this queue"
+            : "Pause this queue: the running task finishes, pending tasks stay queued";
+        toggle.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          const current = state.queues.get(q.id);
+          toggleQueue(q.id, current ? current.state !== "STOPPED" : true);
+        });
+        actions.appendChild(toggle);
+        actions.appendChild(
+          makeActionButton("Clear", `Clear successful instances from ${q.id}?`, () =>
+            clearQueue(q.id, false),
+          ),
+        );
+        actions.appendChild(
+          makeActionButton(
+            "Clear all",
+            `Clear all finished instances from ${q.id}? Refused while any instance is running.`,
+            () => clearQueue(q.id, true),
+            "danger",
+          ),
+        );
+        tr.lastElementChild.appendChild(actions);
+
+        tr.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          selectQueue(q.id);
+        });
+        queuesTableBody.appendChild(tr);
+        return tr;
+      }
+
+      function updateQueueRow(tr, q) {
+        const task = state.tasks.get(q.id);
+        const cells = tr.children;
+        setText(cells[1], task ? task.name : "-");
+        setText(cells[2], task ? task.category : "-");
+        const badge = cells[3].firstElementChild;
+        if (badge) {
+          setText(badge, q.state);
+          const badgeClass = "badge " + q.state.toLowerCase();
+          if (badge.className !== badgeClass) badge.className = badgeClass;
+        }
+        setText(cells[4], q.concurrency);
+        setText(cells[5], q.running);
+        setText(cells[6], q.pending);
+        setText(cells[7], q.succeeded);
+        setText(cells[8], q.failed);
+
+        const toggle = tr.querySelector(".actions button.queue-toggle");
+        if (toggle) {
+          const paused = q.state === "STOPPED";
+          setActionIcon(toggle, paused ? "Resume" : "Pause");
+          const toggleClass =
+            "action-btn queue-toggle " + (paused ? "resume" : "pause");
+          if (toggle.className !== toggleClass) toggle.className = toggleClass;
+          toggle.title = paused
+            ? "Resume processing this queue"
+            : "Pause this queue: the running task finishes, pending tasks stay queued";
+        }
+      }
+
+      async function loadSnapshot() {
+        const queueFocus = focusedRowKey(queuesTableBody, "queueId");
+        try {
+          const [queuesRes, tasksRes] = await Promise.all([
+            fetch("/api/queues"),
+            fetch("/api/tasks"),
+          ]);
+          const queues = await queuesRes.json();
+          const tasks = await tasksRes.json();
+          for (const task of tasks) {
+            state.tasks.set(task.id, task);
+          }
+          for (const q of queues) {
+            state.queues.set(q.id, q);
+            const tr =
+              rowByKey(queuesTableBody, "queueId", q.id) || createQueueRow(q);
+            updateQueueRow(tr, q);
+          }
+          const queueIds = new Set(queues.map((q) => q.id));
+          for (const tr of Array.from(queuesTableBody.children)) {
+            if (!queueIds.has(tr.dataset.queueId)) tr.remove();
+          }
+          restoreRowFocus(queuesTableBody, "queueId", queueFocus);
+          renderQueueActions();
+        } catch (err) {
+          console.error(err);
+        }
+      }
+
+      function makeActionButton(label, message, action, variant) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "action-btn" + (variant ? " " + variant : "");
+        setActionIcon(button, label);
+        button.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          if (window.confirm(message)) action();
+        });
+        return button;
+      }
+
+      async function clearQueue(queueId, all) {
+        try {
+          const res = await fetch(
+            `/api/queues/${encodeURIComponent(queueId)}?clear=${all ? "all" : "success"}`,
+            { method: "POST" },
+          );
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            const running =
+              Array.isArray(body.runningIds) && body.runningIds.length
+                ? ` Running: ${body.runningIds.join(", ")}.`
+                : "";
+            window.alert(
+              body.message
+                ? `Clear failed: ${body.message}${running}`
+                : `Clear failed (${res.status})`,
+            );
+            return;
+          }
+          await loadSnapshot();
+          if (state.selectedQueue) await selectQueue(state.selectedQueue);
+        } catch (err) {
+          console.error(err);
+          window.alert("Clear failed: " + err);
+        }
+      }
+
+      async function toggleQueue(queueId, pause) {
+        const action = pause ? "stop" : "start";
+        const label = pause ? "Pause" : "Resume";
+        try {
+          const res = await fetch(
+            `/api/queues/${encodeURIComponent(queueId)}/${action}`,
+            { method: "POST" },
+          );
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            window.alert(
+              body.message
+                ? `${label} failed: ${body.message}`
+                : `${label} failed (${res.status})`,
+            );
+            return;
+          }
+          await loadSnapshot();
+          if (state.selectedQueue === queueId) await selectQueue(queueId);
+        } catch (err) {
+          console.error(err);
+          window.alert(`${label} failed: ` + err);
+        }
+      }
+
+      async function selectQueue(queueId) {
+        const request = ++queueInstancesRequest;
+        const queueChanged = state.selectedQueue !== queueId;
+        state.selectedQueue = queueId;
+        instancesQueue.textContent = queueId;
+        instancesSection.classList.remove("hidden");
+        renderQueueActions();
+        if (queueChanged) {
+          instancesSearch.value = "";
+          clearSelection();
+        }
+        try {
+          const res = await fetch(`/api/queues/${encodeURIComponent(queueId)}/instances`);
+          const instances = await res.json();
+          if (request !== queueInstancesRequest) return;
+          state.instances = new Map(instances.map((inst) => [inst.id, inst]));
+          renderInstanceRows();
+          // A snapshot refresh replaces the rows, so re-apply the selection
+          // instead of dropping the context and log the user is watching.
+          if (state.selectedInstance !== null) {
+            const inst = state.instances.get(state.selectedInstance);
+            if (inst) renderInstanceContext(inst);
+            else clearSelection();
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      }
+
+      function instanceMatchesSearch(inst, term) {
+        if (!term) return true;
+        const haystack =
+          displayUserId(inst).toLowerCase() +
+          " " +
+          (inst.cwd || "").toLowerCase();
+        return haystack.includes(term);
+      }
+
+      function createInstanceRow(inst) {
+        const tr = document.createElement("tr");
+        tr.dataset.instanceId = String(inst.id);
+        tr.tabIndex = 0;
+        tr.innerHTML = `
+          <td></td>
+          <td></td>
+          <td><span class="badge"></span></td>
+          <td></td>
+          <td></td>
+          <td></td>
+          <td></td>
+        `;
+        const actionsCell = tr.lastElementChild;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "delete-btn";
+        setActionIcon(button, "Delete");
+        button.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          deleteInstance(inst.id);
+        });
+        actionsCell.appendChild(button);
+
+        tr.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          selectInstance(inst.id);
+        });
+        instancesTableBody.appendChild(tr);
+        return tr;
+      }
+
+      function updateInstanceRow(tr, inst) {
+        const cells = tr.children;
+        // user_id is caller-supplied, so render it as text rather than HTML.
+        setText(cells[0], inst.id);
+        setText(cells[1], displayUserId(inst));
+        const badge = cells[2].firstElementChild;
+        if (badge) {
+          setText(badge, inst.state);
+          const badgeClass = "badge " + inst.state.toLowerCase();
+          if (badge.className !== badgeClass) badge.className = badgeClass;
+        }
+        setText(
+          cells[3],
+          inst.exit_code === null || inst.exit_code === undefined
+            ? "-"
+            : inst.exit_code,
+        );
+        setText(cells[4], formatDuration(inst.duration_ms));
+        setText(cells[5], formatTime(inst.created_at));
+        const fullTime = formatFullTime(inst.created_at);
+        if (cells[5].title !== fullTime) cells[5].title = fullTime;
+        tr.classList.toggle("selected", inst.id === state.selectedInstance);
+      }
+
+      // Rows are kept and updated in place so filters, SSE refreshes and
+      // actions do not blank the table or drop hover/focus.
+      function renderInstanceRows() {
+        const term = instancesSearch.value.trim().toLowerCase();
+        const focusId = focusedRowKey(instancesTableBody, "instanceId");
+
+        const desired = [];
+        for (const inst of state.instances.values()) {
+          if (instanceMatchesSearch(inst, term)) desired.push(inst);
+        }
+        const desiredIds = new Set(desired.map((inst) => String(inst.id)));
+
+        for (const tr of Array.from(instancesTableBody.children)) {
+          if (tr.classList.contains("empty-row")) continue;
+          if (!desiredIds.has(tr.dataset.instanceId)) tr.remove();
+        }
+
+        let prev = null;
+        for (const inst of desired) {
+          let tr = rowByKey(instancesTableBody, "instanceId", inst.id);
+          if (!tr) tr = createInstanceRow(inst);
+          updateInstanceRow(tr, inst);
+          const expected = prev
+            ? prev.nextElementSibling
+            : instancesTableBody.firstElementChild;
+          if (tr !== expected) instancesTableBody.insertBefore(tr, expected || null);
+          prev = tr;
+        }
+
+        const empty = instancesTableBody.querySelector(".empty-row");
+        if (desired.length) {
+          if (empty) empty.remove();
+        } else if (empty) {
+          setText(
+            empty.firstElementChild,
+            term ? "No instances match the filter." : "No instances yet.",
+          );
+        } else {
+          const tr = document.createElement("tr");
+          tr.className = "empty-row";
+          const td = document.createElement("td");
+          td.colSpan = 7;
+          td.textContent = term
+            ? "No instances match the filter."
+            : "No instances yet.";
+          tr.appendChild(td);
+          instancesTableBody.appendChild(tr);
+        }
+        restoreRowFocus(instancesTableBody, "instanceId", focusId);
+      }
+
+      async function deleteInstance(instanceId) {
+        const running = state.instances.get(instanceId)?.state === "RUNNING";
+        const message = running
+          ? `Delete running task instance ${instanceId}? It will be aborted and its log removed.`
+          : `Delete task instance ${instanceId}? Its log will be removed too.`;
+        if (!window.confirm(message)) {
+          return;
+        }
+        try {
+          const res = await fetch(`/api/instances/${instanceId}`, {
+            method: "DELETE",
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            window.alert(
+              body.message
+                ? `Delete failed: ${body.message}`
+                : `Delete failed (${res.status})`,
+            );
+            return;
+          }
+          if (state.selectedInstance === instanceId) clearSelection();
+          await loadSnapshot();
+          if (state.selectedQueue) await selectQueue(state.selectedQueue);
+        } catch (err) {
+          console.error(err);
+          window.alert("Delete failed: " + err);
+        }
+      }
+
+      function clearSelection() {
+        state.selectedInstance = null;
+        showContextPlaceholder();
+        logSection.classList.add("hidden");
+        if (window._logSource) {
+          window._logSource.close();
+          window._logSource = null;
+        }
+      }
+
+      // Keep the context pane visible even when nothing is selected so the
+      // instances table does not resize every time a row is picked.
+      function showContextPlaceholder() {
+        contextSection.classList.remove("hidden");
+        instanceGrid.classList.add("with-context");
+        if (state.contextKey === "placeholder") return;
+        state.contextKey = "placeholder";
+        contextInstance.textContent = "";
+        contextPanel.innerHTML = "";
+        const empty = document.createElement("div");
+        empty.className = "context-empty";
+        empty.textContent = "Select an instance to see its context.";
+        contextPanel.appendChild(empty);
+      }
+
+      async function copyText(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch {}
+        // Fallback for browsers or origins without the async clipboard API.
+        try {
+          const area = document.createElement("textarea");
+          area.value = text;
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          const ok = document.execCommand("copy");
+          area.remove();
+          return ok;
+        } catch {
+          return false;
+        }
+      }
+
+      function renderInstanceContext(inst) {
+        contextSection.classList.remove("hidden");
+        instanceGrid.classList.add("with-context");
+        // A snapshot refresh repeats the same context, so skip the rebuild
+        // instead of clearing and redrawing the pane on every SSE event.
+        const key =
+          inst.id +
+          "\u0000" +
+          (inst.input === undefined ? "—" : JSON.stringify(inst.input)) +
+          "\u0000" +
+          (inst.cwd || "");
+        if (key === state.contextKey) return;
+        state.contextKey = key;
+        contextInstance.textContent = inst.id;
+        contextPanel.innerHTML = "";
+
+        const pre = document.createElement("pre");
+        pre.textContent =
+          inst.input === undefined
+            ? "—"
+            : JSON.stringify(inst.input, null, 2);
+        contextPanel.appendChild(pre);
+
+        if (inst.cwd) {
+          const meta = document.createElement("div");
+          meta.className = "context-meta";
+
+          const label = document.createElement("div");
+          label.className = "context-meta-label";
+          label.textContent = "Working directory:";
+          meta.appendChild(label);
+
+          const value = document.createElement("div");
+          value.className = "context-meta-value";
+
+          const path = document.createElement("span");
+          path.className = "context-meta-path";
+          path.textContent = inst.cwd;
+          value.appendChild(path);
+
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "copy-btn";
+          copy.title = "Copy working directory";
+          copy.setAttribute("aria-label", "Copy working directory");
+          copy.innerHTML =
+            '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+          copy.addEventListener("click", async (ev) => {
+            ev.stopPropagation();
+            const ok = await copyText(inst.cwd);
+            copy.classList.toggle("copied", ok);
+            copy.title = ok ? "Copied working directory" : "Copy failed";
+            if (ok) {
+              setTimeout(() => {
+                copy.classList.remove("copied");
+                copy.title = "Copy working directory";
+              }, 1200);
+            }
+          });
+          value.appendChild(copy);
+
+          meta.appendChild(value);
+          contextPanel.appendChild(meta);
+        }
+      }
+
+      function selectInstance(instanceId) {
+        // Clicking the selected row again should not blank and replay its log.
+        const sameInstance =
+          state.selectedInstance === instanceId &&
+          window._logSource &&
+          window._logSource.readyState !== EventSource.CLOSED;
+        state.selectedInstance = instanceId;
+        const inst = state.instances.get(instanceId);
+        if (inst) renderInstanceContext(inst);
+        else showContextPlaceholder();
+        for (const tr of instancesTableBody.querySelectorAll("tr")) {
+          tr.classList.toggle(
+            "selected",
+            tr.dataset.instanceId === String(instanceId),
+          );
+        }
+        logInstance.textContent = instanceId;
+        logSection.classList.remove("hidden");
+        if (sameInstance) return;
+        logPanel.innerHTML = "";
+        // The log stream replays existing records and then tails the file, so
+        // it is the single source of log lines. Fetching /log first would
+        // duplicate every line.
+        if (window._logSource) {
+          window._logSource.close();
+        }
+        const es = new EventSource(`/api/instances/${instanceId}/log/stream`);
+        window._logSource = es;
+        es.onmessage = (ev) => {
+          try {
+            const rec = JSON.parse(ev.data);
+            appendLogLine(rec);
+          } catch {}
+        };
+      }
+
+      function appendLogLine(rec) {
+        // Keep following new output only while the reader is at the bottom.
+        const follow =
+          logPanel.scrollHeight - logPanel.scrollTop - logPanel.clientHeight < 40;
+        const div = document.createElement("div");
+        div.className = "log-line" + (rec.stream === "stderr" ? " stderr" : "");
+        const ts = document.createElement("span");
+        ts.className = "ts";
+        ts.textContent = rec.timestamp || "";
+        const text = document.createElement("span");
+        text.className = "text";
+        text.textContent = rec.text || "";
+        div.appendChild(ts);
+        div.appendChild(text);
+        logPanel.appendChild(div);
+        if (follow) logPanel.scrollTop = logPanel.scrollHeight;
+      }
+
+      function connectEvents() {
+        const es = new EventSource("/api/events");
+        es.onopen = () => {
+          connectionStatus.textContent = "live";
+        };
+        es.onerror = () => {
+          connectionStatus.textContent = "reconnecting...";
+        };
+        es.addEventListener("instanceStateChanged", () => {
+          loadSnapshot();
+          if (state.selectedQueue) {
+            selectQueue(state.selectedQueue);
+          }
+        });
+        es.addEventListener("queueStateChanged", () => {
+          loadSnapshot();
+          if (state.selectedQueue) {
+            selectQueue(state.selectedQueue);
+          }
+        });
+        es.addEventListener("instancesCleared", () => {
+          loadSnapshot();
+          if (state.selectedQueue) {
+            selectQueue(state.selectedQueue);
+          }
+        });
+      }
+
+      enableRowKeyboard(queuesTableBody, (row) => {
+        if (row.dataset.queueId) selectQueue(row.dataset.queueId);
+      });
+      enableRowKeyboard(instancesTableBody, (row) => {
+        const instanceId = Number(row.dataset.instanceId);
+        if (Number.isFinite(instanceId)) selectInstance(instanceId);
+      });
+
+      instancesSearch.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          if (instancesSearch.value) {
+            instancesSearch.value = "";
+            renderInstanceRows();
+          } else {
+            instancesSearch.blur();
+          }
+          return;
+        }
+        if (ev.key === "ArrowDown" || ev.key === "Enter") {
+          const row = tableRows(instancesTableBody)[0];
+          if (!row) return;
+          ev.preventDefault();
+          focusRow(row);
+        }
+      });
+
+      // Single-key shortcuts focus a region so arrows act in it right away.
+      document.addEventListener("keydown", (ev) => {
+        if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        if (helpIsOpen()) {
+          if (ev.key === "Escape") {
+            ev.preventDefault();
+            closeHelp();
+          }
+          return;
+        }
+        const target = ev.target;
+        if (
+          target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+        ) {
+          return;
+        }
+        switch (ev.key) {
+          case "?":
+            ev.preventDefault();
+            openHelp();
+            return;
+          case "/":
+            if (instancesSection.classList.contains("hidden")) return;
+            ev.preventDefault();
+            instancesSearch.focus();
+            instancesSearch.select();
+            return;
+          case "q":
+            ev.preventDefault();
+            focusQueueList();
+            return;
+          case "i":
+            ev.preventDefault();
+            focusInstanceList();
+            return;
+          case "l":
+            ev.preventDefault();
+            focusLogPanel();
+            return;
+        }
+      });
+
+      helpOpenButton.addEventListener("click", openHelp);
+      helpCloseButton.addEventListener("click", closeHelp);
+      helpOverlay.addEventListener("click", (ev) => {
+        if (ev.target === helpOverlay) closeHelp();
+      });
+
+      instancesSearch.addEventListener("input", renderInstanceRows);
+      enableLogKeyboard();
+      loadSnapshot();
+      connectEvents();
+    </script>
+  </body>
+</html>
