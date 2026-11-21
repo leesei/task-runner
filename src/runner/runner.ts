@@ -145,5 +145,21 @@ export function createRunner(config: RunnerConfig) {
     activeControllerKeys(): string[] {
       return [...controllers.keys()];
     },
+
+    /**
+     * Abort in-flight execution for instances removed from the database.
+     * Late completions are fenced by `finishRun` and change nothing.
+     */
+    cancelInstances(instanceIds: number[]): string[] {
+      const ids = new Set(instanceIds);
+      const cancelled: string[] = [];
+      for (const [key, entry] of controllers) {
+        const instanceId = Number(key.slice(0, key.indexOf(":")));
+        if (!ids.has(instanceId)) continue;
+        entry.controller.abort();
+        cancelled.push(key);
+      }
+      return cancelled;
+    },
   };
 }

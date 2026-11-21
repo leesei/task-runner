@@ -76,6 +76,8 @@ export interface InstanceLog {
 
 export interface EnqueueResult {
   id: number;
+  /** Optional caller-supplied id, null when the caller did not provide one. */
+  user_id: string | null;
   createdAt: string;
   /** Normalized context after schema defaults and CLI path resolution. */
   input: unknown;
@@ -89,6 +91,11 @@ export interface EnqueueOptions {
    * project root. Relative values are rejected; adapters resolve them.
    */
   cwd?: string;
+  /**
+   * Optional caller-supplied id. Stored as `user_id`; must be a non-empty
+   * string and unique among existing instances.
+   */
+  userId?: string;
 }
 
 export interface AbortOutcome {
@@ -101,6 +108,11 @@ export interface AbortOutcome {
 export interface ClearOutcome {
   deleted: number;
   logPaths: string[];
+}
+
+export interface DeleteInstanceOutcome {
+  deleted: number;
+  queueId: string;
 }
 
 export interface ReloadResult {
@@ -124,6 +136,7 @@ export interface Core {
   stop(queueId: string): QueueState;
   abort(queueId: string): Promise<AbortOutcome>;
   clear(queueId: string, all?: boolean): ClearOutcome;
+  deleteInstance(instanceId: number): DeleteInstanceOutcome;
 
   reload(): ReloadResult;
   /** Discovery warnings without changing the registry; used by `status`. */
@@ -221,6 +234,30 @@ function resolveWorkingDirectory(
   return resolve(requested);
 }
 
+function resolveUserId(userId: string | undefined): string | undefined {
+  if (userId === undefined) return undefined;
+  if (typeof userId !== "string" || userId.trim().length === 0) {
+    throw new CoreError(
+      "INVALID_INSTANCE_ID",
+      "Instance id must be a non-empty string",
+    );
+  }
+  return userId;
+}
+
+/**
+ * Tasks often carry their own identifier in the context (`input.id`). Use it
+ * as the instance's user-facing id when the caller did not pass one
+ * explicitly, so the dashboard and API can show it without a separate flag.
+ */
+function contextUserId(input: unknown): string | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const id = (input as { id?: unknown }).id;
+  return typeof id === "string" && id.trim().length > 0 ? id : undefined;
+}
+
 export function createCore(config: CoreConfig): Core {
   const { db, lifecycle, projectRoot, dataDir } = config;
   const controlTimeoutMs = config.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
@@ -245,7 +282,9 @@ export function createCore(config: CoreConfig): Core {
         );
       }
 
-      const result = lifecycle.enqueue(taskId, value, cwd);
+      const userId = resolveUserId(options.userId ?? contextUserId(value));
+
+      const result = lifecycle.enqueue(taskId, value, { cwd, userId });
       return { ...result, input: value, cwd };
     },
 
@@ -355,6 +394,19 @@ export function createCore(config: CoreConfig): Core {
       }
 
       return { deleted: result.deleted, logPaths: result.logPaths };
+    },
+
+    deleteInstance(instanceId) {
+      const result = lifecycle.deleteInstance(instanceId);
+
+      // As with clear, the lifecycle does not touch the filesystem.
+      if (result.logPath) {
+        try {
+          unlinkSync(result.logPath);
+        } catch {}
+      }
+
+      return { deleted: 1, queueId: result.queueId };
     },
 
     reload() {

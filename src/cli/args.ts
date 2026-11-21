@@ -136,7 +136,7 @@ tq — Task Runner CLI
 Usage:
   tq                         Show this help
   tq daemon                  Start the daemon
-  tq add <task> [context]    Enqueue a task instance
+  tq add [--id <id>] <task> [context]  Enqueue a task instance
   tq start <queue>           Start draining a queue
   tq stop <queue>            Stop a queue
   tq abort <queue>           Abort running instances

@@ -178,6 +178,55 @@ describe("Seam B: CLI subprocess", () => {
     expect(stdout).toContain(`Working directory: ${projectDir}`);
   });
 
+  test("tq add --id enqueues a caller-supplied id and rejects duplicates", async () => {
+    const proc = Bun.spawn(
+      [TQ_BIN, "add", "default:echo", "--id", "job-4242", "hello"],
+      {
+        cwd: projectDir,
+        env: { ...process.env, TQ_DATA_DIR: dataDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(proc.exitCode).toBe(0);
+    expect(stdout).toMatch(/Enqueued instance \d+/);
+    expect(stdout).toContain("User id: job-4242");
+
+    const duplicate = Bun.spawn(
+      [TQ_BIN, "add", "default:echo", "--id", "job-4242", "hello"],
+      {
+        cwd: projectDir,
+        env: { ...process.env, TQ_DATA_DIR: dataDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const stderr = duplicate.stderr
+      ? await new Response(duplicate.stderr).text()
+      : "";
+    await duplicate.exited;
+    expect(duplicate.exitCode).toBe(2);
+    expect(stderr).toContain("already exists");
+  });
+
+  test("tq add uses a string id from the context as user_id", async () => {
+    const proc = Bun.spawn(
+      [TQ_BIN, "add", "default:echo", '{"id":"ctx-4243","x":1}'],
+      {
+        cwd: projectDir,
+        env: { ...process.env, TQ_DATA_DIR: dataDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(proc.exitCode).toBe(0);
+    expect(stdout).toContain("User id: ctx-4243");
+  });
+
   test("tq add supports escaped JSON, @file, name=value, and name:=value", async () => {
     // task with schema
     writeTask(projectDir, "pathy", {

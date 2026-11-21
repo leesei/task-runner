@@ -57,12 +57,17 @@ export interface ClearResult {
   logPaths: string[];
 }
 
+export interface DeleteInstanceResult {
+  queueId: string;
+  logPath: string | null;
+}
+
 export interface Lifecycle {
   enqueue(
     taskId: string,
     input: unknown,
-    cwd?: string,
-  ): { id: number; createdAt: string };
+    options?: { cwd?: string; userId?: string },
+  ): { id: number; createdAt: string; user_id: string | null };
   claim(): Claim[];
   claimQueue(queueId: string): Claim[];
   finishRun(token: ClaimToken, outcome: RunOutcome): FinishResult;
@@ -74,6 +79,8 @@ export interface Lifecycle {
   retireQueues(queueIds: string[]): { retired: number };
   recoverOnBoot(): { reset: number; started: number; stayedStopped: number };
   clearQueue(queueId: string, options?: { all?: boolean }): ClearResult;
+  /** Delete one instance in any state. Adapters signal RUNNING work separately. */
+  deleteInstance(instanceId: number): DeleteInstanceResult;
 }
 
 export interface LifecycleConfig {
@@ -285,12 +292,28 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
   }
 
   return {
-    enqueue(taskId, input, cwd) {
+    enqueue(taskId, input, options = {}) {
       const collected: LifecycleEvent[] = [];
       const result = immediate(db, () => {
         const task = getTask(taskId);
         if (!task) {
           throw new CoreError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
+        }
+
+        if (options.userId !== undefined) {
+          const existing = db
+            .query<{ id: number }, [string, string]>(
+              `SELECT id FROM instances
+               WHERE user_id = ?
+                  OR (user_id IS NULL AND json_extract(input, '$.id') = ?)`,
+            )
+            .get(options.userId, options.userId);
+          if (existing) {
+            throw new CoreError(
+              "INSTANCE_ID_CONFLICT",
+              `Instance id already exists: ${options.userId}`,
+            );
+          }
         }
 
         db.run(
@@ -300,9 +323,15 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
 
         const createdAt = now().toISOString();
         const inserted = db.run(
-          `INSERT INTO instances (task_id, input, cwd, state, attempt, created_at)
-           VALUES (?, ?, ?, 'PENDING', 1, ?)`,
-          [taskId, JSON.stringify(input), cwd ?? defaultCwd, createdAt],
+          `INSERT INTO instances (task_id, input, cwd, user_id, state, attempt, created_at)
+           VALUES (?, ?, ?, ?, 'PENDING', 1, ?)`,
+          [
+            taskId,
+            JSON.stringify(input),
+            options.cwd ?? defaultCwd,
+            options.userId ?? null,
+            createdAt,
+          ],
         );
         const id = Number(
           (inserted as { lastInsertRowid?: number | bigint }).lastInsertRowid ?? 0,
@@ -319,7 +348,7 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
           setQueueState(queue, "PROCESSING", collected);
         }
 
-        return { id, createdAt };
+        return { id, createdAt, user_id: options.userId ?? null };
       });
 
       publish(collected);
@@ -652,6 +681,46 @@ export function createLifecycle(config: LifecycleConfig): Lifecycle {
         }
 
         return { reset: running.length, started, stayedStopped };
+      });
+
+      publish(collected);
+      return result;
+    },
+
+    deleteInstance(instanceId) {
+      const collected: LifecycleEvent[] = [];
+      const result = immediate(db, (): DeleteInstanceResult => {
+        const instance = db
+          .query<InstanceRow, [number]>(
+            "SELECT id, task_id, input, state, attempt, started_at, log_path FROM instances WHERE id = ?",
+          )
+          .get(instanceId);
+
+        if (!instance) {
+          throw new CoreError(
+            "INSTANCE_NOT_FOUND",
+            `Instance not found: ${instanceId}`,
+          );
+        }
+
+        const queue = getQueue(instance.task_id);
+        db.run("DELETE FROM instances WHERE id = ?", [instanceId]);
+        collected.push({
+          type: "instancesCleared",
+          queueId: instance.task_id,
+          instanceIds: [instanceId],
+        });
+
+        // Deleting the last PENDING or RUNNING instance can leave an empty
+        // queue marked PROCESSING; no finish will arrive to drain it.
+        if (queue?.state === "PROCESSING") {
+          const counts = queueCounts(instance.task_id);
+          if (counts.running === 0 && counts.pending === 0) {
+            setQueueState(queue, "IDLE", collected);
+          }
+        }
+
+        return { queueId: instance.task_id, logPath: instance.log_path };
       });
 
       publish(collected);

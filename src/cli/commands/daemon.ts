@@ -96,6 +96,14 @@ export async function commandDaemon(
   });
   console.log("Runner loop started");
 
+  // Deleting an instance removes its row; abort any execution still running
+  // for it so the process does not outlive the record.
+  events.subscribe((event) => {
+    if (event.type === "instancesCleared") {
+      runner.cancelInstances(event.instanceIds);
+    }
+  });
+
   runner.runContinuous().catch((err) => {
     console.error("Runner loop error:", err);
   });
@@ -107,10 +115,10 @@ export async function commandDaemon(
   try {
     server = Bun.serve({
       port,
-      fetch(req) {
+      fetch(req, server) {
         const url = new URL(req.url);
         if (url.pathname.startsWith("/api/") || url.pathname === "/api") {
-          return apiRouter(req);
+          return apiRouter(req, server);
         }
         // Serve dashboard for root and other non-API routes
         return new Response(getDashboardHtml(), {

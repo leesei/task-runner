@@ -42,6 +42,9 @@ export function appendLogLine(
   };
 
   const fs = require("node:fs");
+  // A deleted instance must not resurrect its log through a late write from
+  // an in-flight task.
+  if (!fs.existsSync(logPath)) return;
   fs.appendFileSync(logPath, JSON.stringify(record) + "\n");
 }
 

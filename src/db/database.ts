@@ -53,6 +53,14 @@ function migrate(db: DB): void {
   } catch {
     // Column already exists.
   }
+  try {
+    db.exec("ALTER TABLE instances ADD COLUMN user_id TEXT");
+  } catch {
+    // Column already exists.
+  }
+  db.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_instances_user_id ON instances(user_id) WHERE user_id IS NOT NULL",
+  );
 }
 
 export function openDatabase(dbPath: string): DB {
@@ -90,4 +98,12 @@ export function configureDatabase(db: DB): void {
   } catch {
     // Column already exists or another non-fatal error — skip
   }
+  try {
+    db.exec("ALTER TABLE instances ADD COLUMN user_id TEXT");
+  } catch {
+    // Column already exists or another non-fatal error — skip
+  }
+  db.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_instances_user_id ON instances(user_id) WHERE user_id IS NOT NULL",
+  );
 }

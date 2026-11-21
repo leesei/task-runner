@@ -14,7 +14,7 @@ import { CoreError } from "../../core/service.ts";
 import { openCliCore } from "../core.ts";
 import { buildContext, UsageError } from "../context.ts";
 
-const ADD_USAGE = "Usage: tq add <task> [context]";
+const ADD_USAGE = "Usage: tq add [--id <id>] <task> [context]";
 
 function getVerboseLevel(flags: Record<string, string | true>): number {
   const v = flags["verbose"];
@@ -37,6 +37,17 @@ export async function commandAdd(
 
   const taskId = args[0]!;
   const verbose = getVerboseLevel(flags);
+
+  let userId: string | undefined;
+  const rawId = flags["id"];
+  if (rawId !== undefined) {
+    if (rawId === true || rawId.trim().length === 0) {
+      console.error("Error: --id must be a non-empty string");
+      console.error(ADD_USAGE);
+      return 2;
+    }
+    userId = rawId;
+  }
 
   let cli;
   try {
@@ -89,8 +100,11 @@ export async function commandAdd(
       console.error(`Normalized context: ${JSON.stringify(input)}`);
     }
 
-    const result = cli.core.enqueue(taskId, input, { cwd });
+    const result = cli.core.enqueue(taskId, input, { cwd, userId });
     console.log(`Enqueued instance ${result.id} at ${result.createdAt}`);
+    if (result.user_id !== null) {
+      console.log(`User id: ${result.user_id}`);
+    }
     console.log(`Task: ${taskId}`);
     console.log(`Context: ${JSON.stringify(result.input)}`);
     console.log(`Working directory: ${result.cwd}`);
@@ -109,6 +123,14 @@ export async function commandAdd(
       for (const issue of err.issues ?? []) {
         console.error(`  ${issue.path}: ${issue.message}`);
       }
+      return 2;
+    }
+    if (err instanceof CoreError && err.code === "INSTANCE_ID_CONFLICT") {
+      console.error(err.message);
+      return 2;
+    }
+    if (err instanceof CoreError && err.code === "INVALID_INSTANCE_ID") {
+      console.error(err.message);
       return 2;
     }
     console.error(`Error: ${err.message}`);

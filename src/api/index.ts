@@ -51,7 +51,10 @@ function coreErrorResponse(err: unknown): Response {
     case "INPUT_SCHEMA_VIOLATION":
       return jsonError(err.code, err.message, 400, err.issues ?? []);
     case "INVALID_CWD":
+    case "INVALID_INSTANCE_ID":
       return jsonError(err.code, err.message, 400);
+    case "INSTANCE_ID_CONFLICT":
+      return jsonError(err.code, err.message, 409);
     case "CLEAR_REFUSED_RUNNING":
       return new Response(
         JSON.stringify({
@@ -74,6 +77,11 @@ export interface ApiHandlers {
   events: EventBus;
   dataDir: string;
   cwd: string;
+}
+
+/** The subset of Bun's server the streaming routes need. */
+export interface RequestTimeoutSetter {
+  timeout(request: Request, seconds: number): void;
 }
 
 export function createApi(h: ApiHandlers) {
@@ -136,6 +144,7 @@ export function createApi(h: ApiHandlers) {
         exit_code: instance.exit_code,
         failure_reason: instance.failure_reason,
         attempt: instance.attempt,
+        user_id: instance.user_id,
         duration_ms: instance.duration_ms,
         created_at: instance.created_at,
         started_at: instance.started_at,
@@ -198,11 +207,16 @@ export function createApi(h: ApiHandlers) {
     task: string;
     input: unknown;
     cwd?: string;
+    id?: string;
   }): Response {
     try {
-      const result = core.enqueue(body.task, body.input, { cwd: body.cwd });
+      const result = core.enqueue(body.task, body.input, {
+        cwd: body.cwd,
+        userId: body.id,
+      });
       return json({
         id: result.id,
+        user_id: result.user_id,
         task: body.task,
         input: result.input,
         cwd: result.cwd,
@@ -225,6 +239,7 @@ export function createApi(h: ApiHandlers) {
       exit_code: instance.exit_code,
       failure_reason: instance.failure_reason,
       attempt: instance.attempt,
+      user_id: instance.user_id,
       duration_ms: instance.duration_ms,
       created_at: instance.created_at,
       started_at: instance.started_at,
@@ -243,7 +258,24 @@ export function createApi(h: ApiHandlers) {
     }
   }
 
-  async function route(req: Request): Promise<Response> {
+  function handleDeleteInstance(instanceId: number): Response {
+    try {
+      const result = core.deleteInstance(instanceId);
+      return json({
+        success: true,
+        deleted: result.deleted,
+        instanceId,
+        queueId: result.queueId,
+      });
+    } catch (err) {
+      return coreErrorResponse(err);
+    }
+  }
+
+  async function route(
+    req: Request,
+    server?: RequestTimeoutSetter,
+  ): Promise<Response> {
     const url = new URL(req.url);
     const pathname = url.pathname;
 
@@ -255,7 +287,11 @@ export function createApi(h: ApiHandlers) {
       }
 
       if (apiPath === "events") {
-        return req.method === "GET" ? handleEventsSSE(req) : jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+        if (req.method !== "GET") return jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+        // SSE can stay quiet for a long time. Bun closes an idle connection
+        // after 10 seconds by default, so disable the timeout per request.
+        server?.timeout(req, 0);
+        return handleEventsSSE(req);
       }
 
       if (apiPath === "tasks") {
@@ -322,7 +358,8 @@ export function createApi(h: ApiHandlers) {
 
         if (subPath === "") {
           if (req.method === "GET") return handleInstanceDetail(instanceId);
-          return jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+          if (req.method === "DELETE") return handleDeleteInstance(instanceId);
+          return jsonError("METHOD_NOT_ALLOWED", "Only GET and DELETE allowed", 405);
         }
 
         if (subPath === "/log") {
@@ -332,6 +369,9 @@ export function createApi(h: ApiHandlers) {
 
         if (subPath === "/log/stream") {
           if (req.method !== "GET") return jsonError("METHOD_NOT_ALLOWED", "Only GET allowed", 405);
+          // The log stream may be quiet between writes; keep it open past
+          // Bun's default 10-second idle timeout.
+          server?.timeout(req, 0);
           return handleLogStream(instanceId, req);
         }
 
@@ -345,17 +385,21 @@ export function createApi(h: ApiHandlers) {
   }
 
   async function handleEnqueue(req: Request): Promise<Response> {
-    let body: { task: string; input: unknown; cwd?: string };
+    let body: { task: string; input: unknown; cwd?: string; id?: string };
     try {
       const parsed = await req.json();
       if (!parsed || typeof (parsed as { task?: unknown }).task !== "string") {
-        return jsonError("INVALID_REQUEST", "Request body must be { task: string, input: any }", 400);
+        return jsonError("INVALID_REQUEST", "Request body must be { task: string, input: any, id?: string }", 400);
       }
       const cwd = (parsed as { cwd?: unknown }).cwd;
       if (cwd !== undefined && typeof cwd !== "string") {
         return jsonError("INVALID_REQUEST", "cwd must be an absolute path string", 400);
       }
-      body = parsed as { task: string; input: unknown; cwd?: string };
+      const id = (parsed as { id?: unknown }).id;
+      if (id !== undefined && (typeof id !== "string" || id.trim().length === 0)) {
+        return jsonError("INVALID_REQUEST", "id must be a non-empty string", 400);
+      }
+      body = parsed as { task: string; input: unknown; cwd?: string; id?: string };
     } catch {
       return jsonError("INVALID_JSON", "Request body must be valid JSON", 400);
     }
@@ -418,6 +462,10 @@ export function createApi(h: ApiHandlers) {
 
         req.signal.addEventListener("abort", onAbort);
       },
+      cancel() {
+        closed = true;
+        unsubscribe?.();
+      },
       pull() {
         // The consumer drained the frames it had; memory is released.
         backlog = 0;
@@ -474,6 +522,9 @@ export function createApi(h: ApiHandlers) {
         };
 
         req.signal.addEventListener("abort", onAbort);
+      },
+      cancel() {
+        closed = true;
       },
     });
 

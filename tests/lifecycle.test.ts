@@ -101,6 +101,29 @@ describe("lifecycle: enqueue, claim, finish", () => {
     ]);
   });
 
+  test("enqueue stores a unique caller-supplied user_id and rejects duplicates", () => {
+    const explicit = lifecycle.enqueue(
+      "default:echo",
+      { seq: 1 },
+      { userId: "job-500" },
+    );
+    expect(explicit.user_id).toBe("job-500");
+    expect(getInstance(db, explicit.id)!.user_id).toBe("job-500");
+
+    const automatic = lifecycle.enqueue("default:echo", { seq: 2 });
+    expect(automatic.user_id).toBeNull();
+    expect(getInstance(db, automatic.id)!.user_id).toBeNull();
+
+    let caught: unknown;
+    try {
+      lifecycle.enqueue("default:echo", { seq: 3 }, { userId: "job-500" });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(CoreError);
+    expect((caught as CoreError).code).toBe("INSTANCE_ID_CONFLICT");
+  });
+
   test("claim is FIFO, respects concurrency, and does not increment the attempt", () => {
     const first = lifecycle.enqueue("default:echo", { seq: 1 });
     const second = lifecycle.enqueue("default:echo", { seq: 2 });
@@ -334,6 +357,67 @@ describe("lifecycle: enqueue, claim, finish", () => {
     expect(logDir).toBeTruthy();
   });
 
+  test("deleteInstance removes a finished row, returns its log path, and publishes a removal", () => {
+    const finished = lifecycle.enqueue("default:echo", {});
+    const [claim] = lifecycle.claim();
+    lifecycle.finishRun(
+      { instanceId: claim!.instanceId, attempt: claim!.attempt },
+      { kind: "success" },
+    );
+    const logPath = getInstance(db, finished.id)!.log_path!;
+
+    sink.events.length = 0;
+    const result = lifecycle.deleteInstance(finished.id);
+
+    expect(result).toEqual({ queueId: "default:echo", logPath });
+    expect(getInstance(db, finished.id)).toBeNull();
+    expect(sink.events).toEqual([
+      {
+        type: "instancesCleared",
+        queueId: "default:echo",
+        instanceIds: [finished.id],
+      },
+    ]);
+  });
+
+  test("deleteInstance removes PENDING and RUNNING instances and idles an empty queue", () => {
+    const pending = lifecycle.enqueue("default:echo", {});
+    expect(getQueue(db, "default:echo")!.state).toBe("PROCESSING");
+
+    lifecycle.deleteInstance(pending.id);
+    expect(getInstance(db, pending.id)).toBeNull();
+    expect(getQueue(db, "default:echo")!.state).toBe("IDLE");
+
+    const running = lifecycle.enqueue("default:echo", {});
+    lifecycle.claim();
+    expect(getInstance(db, running.id)!.state).toBe("RUNNING");
+    expect(getQueue(db, "default:echo")!.state).toBe("PROCESSING");
+
+    sink.events.length = 0;
+    lifecycle.deleteInstance(running.id);
+    expect(getInstance(db, running.id)).toBeNull();
+    expect(getQueue(db, "default:echo")!.state).toBe("IDLE");
+    expect(sink.events).toEqual([
+      {
+        type: "instancesCleared",
+        queueId: "default:echo",
+        instanceIds: [running.id],
+      },
+      { type: "queueStateChanged", queueId: "default:echo", state: "IDLE" },
+    ]);
+  });
+
+  test("deleteInstance reports an unknown instance", () => {
+    let caught: unknown;
+    try {
+      lifecycle.deleteInstance(999_999);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(CoreError);
+    expect((caught as CoreError).code).toBe("INSTANCE_NOT_FOUND");
+  });
+
   test("clear --all refuses while an instance is RUNNING", () => {
     lifecycle.enqueue("default:echo", {});
     lifecycle.claim();
@@ -443,6 +527,53 @@ describe("schema migration", () => {
       .get() as { claim_tokens: string };
     expect(JSON.parse(row.claim_tokens)).toEqual([
       { instanceId: 7, attempt: 2 },
+    ]);
+    closeDatabase(db);
+  });
+
+  test("an older instances table gains user_id with a unique index on open", () => {
+    const dataDir = makeTempDir("tq-migration-");
+    const dbPath = resolveDataDir(dataDir).dbPath;
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        input TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'PENDING',
+        attempt INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    legacy.close();
+
+    const db = openDatabase(dbPath);
+    const columns = db
+      .query("PRAGMA table_info(instances)")
+      .all() as Array<{ name: string }>;
+    expect(columns.some((column) => column.name === "user_id")).toBe(true);
+
+    db.run("INSERT INTO instances (task_id, input, user_id) VALUES (?, ?, ?)", [
+      "default:echo",
+      "{}",
+      "legacy-1",
+    ]);
+    expect(() =>
+      db.run("INSERT INTO instances (task_id, input, user_id) VALUES (?, ?, ?)", [
+        "default:echo",
+        "{}",
+        "legacy-1",
+      ]),
+    ).toThrow();
+
+    // Instances without a caller-supplied id are not constrained.
+    db.run("INSERT INTO instances (task_id, input) VALUES (?, ?)", [
+      "default:echo",
+      "{}",
+    ]);
+    db.run("INSERT INTO instances (task_id, input) VALUES (?, ?)", [
+      "default:echo",
+      "{}",
     ]);
     closeDatabase(db);
   });

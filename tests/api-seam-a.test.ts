@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createApi } from "../src/api/index.ts";
+import { createApi, type RequestTimeoutSetter } from "../src/api/index.ts";
 import {
   bootstrapDataDir,
   closeDatabase,
@@ -43,7 +43,7 @@ describe("Seam A: Daemon HTTP API", () => {
   let dataDir: string;
   let projectDir: string;
   let db: any;
-  let api: (req: Request) => Promise<Response>;
+  let api: (req: Request, server?: RequestTimeoutSetter) => Promise<Response>;
   let runner: any;
   let harness: TestHarness;
   let server: any;
@@ -235,6 +235,91 @@ describe("Seam A: Daemon HTTP API", () => {
     expect(body.task).toBe("default:success");
   });
 
+  test("enqueue accepts an optional unique string id and rejects duplicates", async () => {
+    const res = await fetch(`${baseUrl}/api/instances`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: "default:success",
+        input: {},
+        id: "job-7001",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      id?: number;
+      user_id?: string | null;
+    };
+    expect(body.id).toBeDefined();
+    expect(body.user_id).toBe("job-7001");
+
+    const detailRes = await fetch(`${baseUrl}/api/instances/${body.id}`);
+    expect(detailRes.status).toBe(200);
+    const detail = (await detailRes.json()) as {
+      task_id: string;
+      user_id: string;
+    };
+    expect(detail.task_id).toBe("default:success");
+    expect(detail.user_id).toBe("job-7001");
+
+    const duplicate = await fetch(`${baseUrl}/api/instances`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: "default:success",
+        input: {},
+        id: "job-7001",
+      }),
+    });
+    expect(duplicate.status).toBe(409);
+    const error = (await duplicate.json()) as { code?: string };
+    expect(error.code).toBe("INSTANCE_ID_CONFLICT");
+  });
+
+  test("enqueue derives user_id from a string context id", async () => {
+    const res = await fetch(`${baseUrl}/api/instances`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: "default:echo",
+        input: { id: "ctx-7002", x: 1 },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      id?: number;
+      user_id?: string | null;
+      input?: unknown;
+    };
+    expect(body.user_id).toBe("ctx-7002");
+    expect(body.input).toEqual({ id: "ctx-7002", x: 1 });
+
+    const duplicate = await fetch(`${baseUrl}/api/instances`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: "default:echo",
+        input: { id: "ctx-7002", x: 2 },
+      }),
+    });
+    expect(duplicate.status).toBe(409);
+    const error = (await duplicate.json()) as { code?: string };
+    expect(error.code).toBe("INSTANCE_ID_CONFLICT");
+  });
+
+  test("enqueue rejects invalid ids", async () => {
+    for (const id of [0, -1, 1.5, true, null, "", "   "]) {
+      const res = await fetch(`${baseUrl}/api/instances`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: "default:success", input: {}, id }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code?: string };
+      expect(body.code).toBe("INVALID_REQUEST");
+    }
+  });
+
   test("enqueue stores the default and explicit working directory", async () => {
     const target = join(projectDir, "workdir");
     mkdirSync(target, { recursive: true });
@@ -332,6 +417,35 @@ describe("Seam A: Daemon HTTP API", () => {
     } catch {}
   });
 
+  test("SSE routes disable Bun's idle timeout", async () => {
+    const calls: Array<{ path: string; seconds: number }> = [];
+    const fakeServer: RequestTimeoutSetter = {
+      timeout(req, seconds) {
+        calls.push({ path: new URL(req.url).pathname, seconds });
+      },
+    };
+
+    const eventsRes = await api(
+      new Request(`${baseUrl}/api/events`),
+      fakeServer,
+    );
+    expect(eventsRes.headers.get("content-type")).toContain("text/event-stream");
+    await eventsRes.body?.cancel();
+
+    const { id } = harness.core.enqueue("default:echo", {});
+    const logRes = await api(
+      new Request(`${baseUrl}/api/instances/${id}/log/stream`),
+      fakeServer,
+    );
+    expect(logRes.headers.get("content-type")).toContain("text/event-stream");
+    await logRes.body?.cancel();
+
+    expect(calls).toEqual([
+      { path: "/api/events", seconds: 0 },
+      { path: `/api/instances/${id}/log/stream`, seconds: 0 },
+    ]);
+  });
+
   test("log stream replays existing records and then tails the file", async () => {
     const { id } = harness.core.enqueue("default:noisy", {});
     await waitFor(() => harness.core.getInstance(id)!.state === "SUCCESS");
@@ -352,5 +466,68 @@ describe("Seam A: Daemon HTTP API", () => {
     try {
       await reader.cancel();
     } catch {}
+  });
+
+  test("delete instance removes a finished instance and its log", async () => {
+    const { id } = harness.core.enqueue("default:success", {});
+    await waitFor(() => harness.core.getInstance(id)!.state === "SUCCESS");
+    const logPath = harness.core.getInstance(id)!.log_path!;
+    expect(existsSync(logPath)).toBe(true);
+
+    const res = await fetch(`${baseUrl}/api/instances/${id}`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      success: boolean;
+      deleted: number;
+      instanceId: number;
+      queueId: string;
+    };
+    expect(body).toEqual({
+      success: true,
+      deleted: 1,
+      instanceId: id,
+      queueId: "default:success",
+    });
+    expect(harness.core.getInstance(id)).toBeNull();
+    expect(existsSync(logPath)).toBe(false);
+  });
+
+  test("delete instance removes a running instance and idles the queue", async () => {
+    const { id } = harness.core.enqueue("default:slow", {});
+    await waitFor(() => harness.core.getInstance(id)!.state === "RUNNING");
+
+    const res = await fetch(`${baseUrl}/api/instances/${id}`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(200);
+    expect(harness.core.getInstance(id)).toBeNull();
+    expect(harness.core.getQueue("default:slow")!.state).toBe("IDLE");
+  });
+
+  test("queue stop pauses the queue and start resumes it", async () => {
+    const stop = await fetch(`${baseUrl}/api/queues/default:noschema/stop`, {
+      method: "POST",
+    });
+    expect(stop.status).toBe(200);
+    expect(await stop.json()).toEqual({ success: true, state: "STOPPED" });
+    expect(harness.core.getQueue("default:noschema")!.state).toBe("STOPPED");
+
+    const start = await fetch(`${baseUrl}/api/queues/default:noschema/start`, {
+      method: "POST",
+    });
+    expect(start.status).toBe(200);
+    expect(await start.json()).toEqual({ success: true, state: "IDLE" });
+    expect(harness.core.getQueue("default:noschema")!.state).toBe("IDLE");
+  });
+
+  test("delete unknown instance returns 404", async () => {
+    const res = await fetch(`${baseUrl}/api/instances/999999`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe("INSTANCE_NOT_FOUND");
   });
 });
