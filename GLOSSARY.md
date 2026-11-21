@@ -8,7 +8,7 @@ A self-describing definition discovered from a search path: a folder with an ent
 
 ## Task instance
 
-One enqueued execution of a task. Carries normalized input, attempt number, state (`PENDING`, `RUNNING`, `SUCCESS`, `FAILED`), timings, exit code, failure reason, and log path. Referred to by its numeric id. The attempt number is also the completion fence: a finish applies only to the running attempt it was claimed from.
+One enqueued execution of a task. Carries normalized input, an optional caller-supplied `user_id`, attempt number, state (`PENDING`, `RUNNING`, `SUCCESS`, `FAILED`), timings, exit code, failure reason, and log path. Referred to by its numeric id, which is database-assigned, or by a unique `user_id` when one was supplied at enqueue, either explicitly or as a string `input.id` in the context. The attempt number is also the completion fence: a finish applies only to the running attempt it was claimed from.
 
 ## Context
 

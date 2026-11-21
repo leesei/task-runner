@@ -97,7 +97,7 @@ interface ClearResult {
 }
 
 interface Lifecycle {
-  enqueue(taskId: string, input: unknown, cwd?: string): { id: number; createdAt: string };
+  enqueue(taskId: string, input: unknown, options?: { cwd?: string; userId?: string }): { id: number; createdAt: string; user_id: string | null };
   claim(): Claim[];
   claimQueue(queueId: string): Claim[];
   finishRun(token: ClaimToken, outcome: RunOutcome): FinishResult;
@@ -269,10 +269,14 @@ Core operations:
 - **enqueue and reads** — enqueue, list queues, queue detail, list instances,
   instance detail, read log, list task definitions;
 - **queue control** — start, stop, abort, clear;
+- **instance maintenance** — delete one instance in any state and its log;
 - **maintenance** — reload discovery, sync queues, boot recovery;
 - **install** — lockfile update and package task discovery (CLI-only).
 
-Core validates input before calling `lifecycle.enqueue`. `abort` is
+Core validates input before calling `lifecycle.enqueue`. When no explicit
+`userId` is supplied, a non-empty string `input.id` becomes the instance's
+`user_id`; uniqueness is enforced by the lifecycle and a partial unique index.
+`abort` is
 two-phase: core writes a durable control request and waits a bounded time; the
 runner performs the lifecycle abort and signals the controllers. Core does not
 perform the abort transition itself, so nothing changes when no daemon can
@@ -296,7 +300,9 @@ state transitions.
    timeout, or throw.
 
 Controllers are keyed by `instanceId:attempt`, never by instance id alone. A
-stale abort token therefore cannot signal a newer attempt.
+stale abort token therefore cannot signal a newer attempt. The daemon also
+subscribes to `instancesCleared` and calls `runner.cancelInstances`, so deleting
+a RUNNING instance aborts the process instead of leaving it orphaned.
 
 The runner keeps the controller map, timeout timers, task-module import, and
 control-request consumption. It does not write queue or instance state.
@@ -371,8 +377,8 @@ input; 1 for runtime failure.
 **HTTP.** `createApi({ core, events, dataDir })` maps transport input to core
 calls, `CoreError.code` to status and JSON error bodies, and core results to
 responses. SSE handlers subscribe to the event bus. The API carries no queue
-or instance rules. The dashboard is a read-only consumer of the same endpoints
-and events; it is not implemented yet.
+or instance rules. The dashboard reads the same endpoints and events and offers
+delete for instances in any state; queue controls stay on the CLI and API.
 
 ## Seams and adapters
 

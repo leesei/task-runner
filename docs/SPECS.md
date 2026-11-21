@@ -391,6 +391,11 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
   violation.
 - The enqueue core result includes the instance id and its persisted creation timestamp, so
   `add` can print both without a second lookup or an HTTP round trip.
+- `add` accepts an optional `--id <id>` for the new instance's `user_id`. The id must be a
+  non-empty string and unique among existing instances; a duplicate is rejected with exit 2
+  and no row is created. When `--id` is omitted, a non-empty string `id` in the task context
+  is used as `user_id`; tasks without one get `NULL`. The numeric instance id remains
+  database-assigned.
 - `add` prints the instance id, creation time, task id, normalized context, and working directory to stdout:
   `Enqueued instance <id> at <ISO-8601 UTC>`, followed by `Task: <task-id>`,
   `Context: <compact JSON>`, and `Working directory: <absolute path>`. The timestamp is the instance's persisted creation time.
@@ -407,7 +412,7 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
 | Command                    | Behavior                                                            |
 | -------------------------- | ------------------------------------------------------------------- |
 | `tq daemon`                | Start the HTTP server, dashboard, and runner loop; queues autostart |
-| `tq add <task> [context]`  | Validate context, enqueue, print id/time/task/context               |
+| `tq add [--id <id>] <task> [context]` | Validate context, enqueue, print id/time/task/context      |
 | `tq start <queue>`         | Begin draining pending instances                                    |
 | `tq stop <queue>`          | Finish running instances, start nothing new                         |
 | `tq abort <queue>`         | Cancel running instances back to PENDING, leave the queue stopped   |
@@ -441,9 +446,12 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
 | `POST /api/queues/:queueId/start`    | Start a queue                                                               |
 | `POST /api/queues/:queueId/stop`     | Stop a queue                                                                |
 | `POST /api/queues/:queueId/abort`    | Abort current RUNNING instances and stop the queue                          |
+| `POST /api/queues/:queueId?clear=success` | Delete SUCCESS instances and their logs                                |
+| `POST /api/queues/:queueId?clear=all` | Delete all finished instances and their logs (409 while any RUNNING)      |
 | `GET /api/tasks`                     | Registered task definitions with name, category, concurrency, and schema    |
-| `POST /api/instances`                | Validate context against the task schema; enqueue (`{ task, input }`)       |
+| `POST /api/instances`                | Validate context against the task schema; enqueue (`{ task, input, id?, cwd? }`) |
 | `GET /api/instances/:id`             | Instance detail                                                             |
+| `DELETE /api/instances/:id`          | Delete an instance in any state and its log                                 |
 | `GET /api/instances/:id/log`         | Merged log content (JSONL parsed into ordered records)                      |
 | `GET /api/events`                    | Server-sent events for queue and instance state changes                     |
 | `GET /api/instances/:id/log/stream`  | Server-sent events: replay the log from the start, then follow              |
@@ -454,18 +462,27 @@ PROCESSING → IDLE                   (drained: nothing running, nothing pending
   return 404 `TASK_NOT_FOUND`; malformed JSON returns 400 `INVALID_JSON`. The body accepts an
   optional absolute `cwd`; omitting it uses the daemon's project root, and an invalid value
   returns 400 `INVALID_CWD` without creating an instance. Instance detail and queue instance
-  listings include `cwd`.
+  listings include `cwd`. An optional `id` must be a non-empty string, stored as `user_id`;
+  when omitted, a string `input.id` is used instead. Duplicates return 409
+  `INSTANCE_ID_CONFLICT` and invalid values return 400 `INVALID_REQUEST`.
+- `DELETE /api/instances/:id` deletes an instance in any state and its log file. Deleting a
+  RUNNING instance signals the daemon to abort its execution; deleting the last PENDING or
+  RUNNING instance returns an empty PROCESSING queue to IDLE. Unknown ids return 404
+  `INSTANCE_NOT_FOUND`.
 - The HTTP API does not resolve `format: "path"` values. API clients send absolute paths when
   a task requires them.
 - Queue id is the task id (`namespace:id`). Unknown queue or instance ids return a
   structured error with a stable code and a human-readable message.
 - Slow event consumers are dropped rather than buffered without bound.
-- The dashboard is read-only in v1: no start/stop/abort buttons. Operational commands stay on
-  the CLI and API.
+- The dashboard can delete task instances in any state (RUNNING work is aborted) and clear a
+  queue in place: "Clear" deletes SUCCESS instances, "Clear all" deletes every finished instance
+  and is refused with 409 while any instance is RUNNING. It has no start/stop/abort buttons;
+  queue controls stay on the CLI and API.
 - Dashboard content: queue table (id, name, category, state, concurrency, running, pending,
-  succeeded, failed), an instance table per queue (id, state, exit code, duration, enqueue
-  time), and an instance view with merged stdout/stderr that tails live. Counts and states
-  arrive over the event stream; a mid-run page load gets current state immediately.
+  succeeded, failed, actions), an instance table per queue (id, user id, state, exit code,
+  duration, enqueue time, actions), and an instance view with merged stdout/stderr that tails
+  live. Counts and states arrive over the event stream; a mid-run page load gets current state
+  immediately.
 
 ### D12 — Redaction
 
@@ -603,7 +620,7 @@ rules of its own.
   safety net, a transport-independent core shared by the CLI and HTTP API, no HTTP calls from
   the CLI, durable control requests consumed by the runner poll loop for daemon-directed abort
   and reload, CLI liveness checked from the descriptor pid instead of an HTTP health probe,
-  destructive clear with RUNNING protected, read-only dashboard in v1, install from the
+  destructive clear with RUNNING protected, dashboard delete for instances in any state, install from the
   installed package location discovered through the lockfile, project-first precedence with
   first-match-wins, no config file in v1, and reload re-reading manifests and task code.
 - **Adapter rule:** CLI and HTTP behavior must not diverge. Add or change a core function first;
